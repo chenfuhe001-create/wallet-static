@@ -46,6 +46,7 @@ npm run build
 - [x] 私钥本地二维码
 - [x] OP / Circle v0.8 AA（USDC permit、7702 授权、paymasterData、Pimlico 直连）
 - [x] 本地改密 / 重新加密备份
+- [x] 真实链上 canary（用户确认 BSC/OP 小额转账成功）
 - [ ] 本地地址本 / 批量转账
 
 ## 开发约定与技能

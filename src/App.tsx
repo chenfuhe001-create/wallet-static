@@ -5,6 +5,7 @@ import type { Hex } from 'viem'
 import { BSC, OP } from './chains'
 import {
   addWallet,
+  changePassword,
   closeVault,
   createVault,
   exportVaultJson,
@@ -72,6 +73,8 @@ export default function App() {
   const [transfer, setTransfer] = useState<TransferState>(EMPTY_TRANSFER)
   const [reveal, setReveal] = useState<{ address: string; privateKey: Hex } | null>(null)
   const [importKey, setImportKey] = useState('')
+  const [newPassword, setNewPassword] = useState('')
+  const [newPassword2, setNewPassword2] = useState('')
   const revealTimer = useRef<number | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
 
@@ -249,6 +252,29 @@ export default function App() {
       void refreshBalances()
     } catch (e) {
       setError(e instanceof Error ? e.message : '导入失败')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const changePass = async () => {
+    if (!opened) return
+    if (newPassword !== newPassword2) {
+      setError('两次输入的新密码不一致')
+      return
+    }
+    setBusy('正在用新密码重新加密…')
+    setError('')
+    try {
+      const next = await changePassword(opened, newPassword)
+      await saveStoredVault(next.data)
+      setStored(next.data)
+      setOpened(next)
+      setNewPassword('')
+      setNewPassword2('')
+      setNotice('已用新密码重新加密；旧密码立即失效，请重新导出备份')
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '修改密码失败')
     } finally {
       setBusy('')
     }
@@ -536,6 +562,30 @@ export default function App() {
             导入
           </button>
         </div>
+
+        <details className="importRow">
+          <summary className="small muted">修改钱包密码（重新加密）</summary>
+          <div className="row">
+            <input
+              type="password"
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              placeholder="新密码（至少 12 位）"
+              autoComplete="new-password"
+            />
+            <input
+              type="password"
+              value={newPassword2}
+              onChange={(e) => setNewPassword2(e.target.value)}
+              placeholder="再次输入新密码"
+              autoComplete="new-password"
+            />
+            <button className="ghost" onClick={() => void changePass()} disabled={Boolean(busy)}>
+              重新加密
+            </button>
+          </div>
+          <p className="small muted">迁移后建议改一次密码，旧服务器用过的密码立即失效。</p>
+        </details>
       </section>
 
       {selected ? (

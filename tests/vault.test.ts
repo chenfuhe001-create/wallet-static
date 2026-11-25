@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import fixture from './fixtures/vault-test.json'
 import {
   addWallet,
+  changePassword,
   closeVault,
   createVault,
   exportVaultJson,
@@ -49,5 +50,23 @@ describe('vault compatibility', () => {
     expect(reopened.wallets.map((w) => w.id)).toEqual([first.id, second.id])
     closeVault(reopened)
     closeVault(created)
+  })
+
+  it('re-encrypts with a new password', async () => {
+    const key = `0x${'66'.repeat(32)}` as const
+    const created = await createVault({
+      password: PASSWORD,
+      privateKeys: [key],
+      kdfOps: 1,
+      kdfMem: 4 * 1024 * 1024,
+    })
+    const changed = await changePassword(created, 'new-password-456', 1, 4 * 1024 * 1024)
+    const reopened = await unlockVault(parseVaultJson(exportVaultJson(changed.data)), 'new-password-456')
+    expect(reopened.wallets[0].privateKey).toBe(key)
+    await expect(
+      unlockVault(parseVaultJson(exportVaultJson(changed.data)), PASSWORD),
+    ).rejects.toThrow('钱包密码错误')
+    closeVault(reopened)
+    closeVault(changed)
   })
 })

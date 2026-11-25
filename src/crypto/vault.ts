@@ -460,6 +460,75 @@ export async function addWallet(
 }
 
 /** 关闭保险箱：尽力清零内存密钥。 */
+/** 用新密码重新加密整个保险箱（用于迁移后轮换密码）。 */
+export async function changePassword(
+  opened: OpenedVault,
+  newPassword: string,
+  kdfOps = DEFAULT_OPS,
+  kdfMem = DEFAULT_MEM,
+): Promise<OpenedVault> {
+  await ready()
+  const password = validatePassword(newPassword)
+  if (!Number.isInteger(kdfOps) || kdfOps < 1 || kdfOps > KDF_OPS_MAX) throw new Error('KDF ops 参数异常')
+  if (!Number.isInteger(kdfMem) || kdfMem < KDF_MEM_MIN || kdfMem > KDF_MEM_MAX) throw new Error('KDF mem 参数异常')
+  const salt = sodium.randombytes_buf(SALT_LEN)
+  const dataKey = sodium.randombytes_buf(KEY_LEN)
+  const kek = await deriveKek(password, salt, kdfOps, kdfMem)
+  try {
+    const wrapNonce = sodium.randombytes_buf(NONCE_LEN)
+    const kdf: VaultKdf = { algo: KDF_ALGO, ops: kdfOps, mem: kdfMem, salt: bytesToB64(salt) }
+    const wrapped = sodium.crypto_aead_xchacha20poly1305_ietf_encrypt(
+      dataKey,
+      headerAad(kdf),
+      null,
+      wrapNonce,
+      kek,
+    )
+    const updated = now()
+    const oldMeta = opened.data.meta
+    const meta: VaultMeta = {
+      version: META_VERSION,
+      next_id: Math.max(Number(oldMeta.next_id) || 1, ...opened.wallets.map((w) => w.id + 1)),
+      scheme: SCHEME,
+      kdf,
+      cipher: CIPHER,
+      wrapNonce: bytesToB64(wrapNonce),
+      wrappedKey: bytesToB64(wrapped),
+      created_at: oldMeta.created_at || updated,
+      updated_at: updated,
+    }
+    const wallets: VaultRecord[] = []
+    for (const record of opened.data.wallets) {
+      const openedWallet = opened.wallets.find((w) => w.id === record.id)
+      if (!openedWallet) throw new Error(`钱包 #${record.id} 缺少明文私钥，无法重新加密`)
+      wallets.push({
+        ...record,
+        updated_at: updated,
+        cipher: await encryptRecord(openedWallet.privateKey, dataKey, record.id, record.address),
+      })
+    }
+    try {
+      sodium.memzero(opened.dataKey)
+    } catch {
+      /* 忽略 */
+    }
+    return { data: { meta, wallets }, dataKey, wallets: opened.wallets }
+  } catch (err) {
+    try {
+      sodium.memzero(dataKey)
+    } catch {
+      /* 忽略 */
+    }
+    throw err
+  } finally {
+    try {
+      sodium.memzero(kek)
+    } catch {
+      /* 忽略 */
+    }
+  }
+}
+
 export function closeVault(opened: OpenedVault | null): void {
   if (!opened) return
   try {

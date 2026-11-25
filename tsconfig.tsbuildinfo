@@ -1,1 +1,1 @@
-{"root":["./src/App.tsx","./src/chains.ts","./src/main.tsx","./src/rpc.ts","./src/storage.ts","./src/vite-env.d.ts","./src/crypto/vault.ts","./src/evm/bsc.ts","./src/evm/op.ts","./tests/aa-vector.test.ts","./tests/vault.test.ts","./vite.config.ts"],"version":"5.8.3"}
+{"root":["./src/App.tsx","./src/SelfTest.tsx","./src/chains.ts","./src/main.tsx","./src/rpc.ts","./src/storage.ts","./src/vite-env.d.ts","./src/crypto/vault.ts","./src/evm/bsc.ts","./src/evm/op.ts","./tests/aa-vector.test.ts","./tests/vault.test.ts","./vite.config.ts"],"version":"5.8.3"}

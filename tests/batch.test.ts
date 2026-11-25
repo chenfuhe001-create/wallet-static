@@ -7,7 +7,7 @@ import {
   runBatch,
 } from '../src/evm/batch'
 import type { BatchItem, BatchSenderAdapter, BatchSendResult } from '../src/evm/batch'
-import { PreBroadcastError } from '../src/rpc'
+import { AmbiguousBroadcastError, PreBroadcastError } from '../src/rpc'
 
 const FROM_A = '0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A'
 const FROM_B = '0x000000000000000000000000000000000000dEaD'
@@ -182,6 +182,26 @@ describe('批量转账：执行器', () => {
     expect(items[1].error).toContain('Failed to fetch')
     expect(isRetryable(items[1])).toBe(true)
     expect(adapter.calls).toHaveLength(3)
+  })
+
+  it('广播响应丢失时保留 UserOp/交易哈希，标结果不明', async () => {
+    const adapter = fakeAdapter(FROM_A, async () => {
+      throw new AmbiguousBroadcastError('OP 发送结果不明：Failed to fetch', `0x${'78'.repeat(32)}`)
+    })
+    const items = await runBatch(
+      planOf([
+        [FROM_A, TO_1],
+        [FROM_A, TO_2],
+      ]),
+      new Map([[FROM_A, adapter]]),
+      { sleep: async () => {} },
+    )
+    expect(items[0].status).toBe('unknown')
+    expect(items[0].broadcasted).toBe(true)
+    expect(items[0].userOpHash).toBe(`0x${'78'.repeat(32)}`)
+    expect(items[1].status).toBe('failed')
+    expect(items[1].broadcasted).toBe(false)
+    expect(isRetryable(items[1])).toBe(true)
   })
 
   it('发送抛错按结果不明处理，停止该钱包后续笔', async () => {

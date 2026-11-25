@@ -20,6 +20,26 @@ export class PreBroadcastError extends Error {
   }
 }
 
+/** 已发出广播请求但没拿到哈希：可能已上链，结果不明。 */
+export class AmbiguousBroadcastError extends Error {
+  constructor(
+    message: string,
+    readonly userOpHash?: string,
+    readonly txHash?: string,
+  ) {
+    super(message)
+    this.name = 'AmbiguousBroadcastError'
+  }
+}
+
+/** 网络抖动/限流：可以退避重试；限流通常约 30 秒恢复。 */
+export function isTransientNetworkError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err)
+  return /Failed to fetch|NetworkError|network|fetch|超时|timeout|HTTP 5\d\d|HTTP 429|rate limit|too many/i.test(
+    message,
+  )
+}
+
 /** 已广播但链上执行失败的交易；批量重试时必须识别，避免重复转账。 */
 export class BroadcastError extends Error {
   constructor(message: string, readonly hash: string) {

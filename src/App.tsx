@@ -561,7 +561,8 @@ export default function App() {
         </section>
 
         <footer className="muted small">
-          静态页面 · 无后端 · 直连公共 RPC · 密码/私钥不离开本机
+          静态页面 · 无后端 · 直连公共 RPC · 密码/私钥不离开本机 · 构建{' '}
+          {__BUILD_TIME__.slice(0, 16).replace('T', ' ')} UTC
         </footer>
       </div>
     )

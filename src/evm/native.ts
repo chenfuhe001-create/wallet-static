@@ -3,11 +3,21 @@
  * 与 Circle AA 路径完全分离：不使用 7702 / Paymaster / USDC gas。
  */
 
-import { formatEther, isAddress, parseEther, parseGwei } from 'viem'
+import { formatEther, isAddress, keccak256, parseEther, parseGwei } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import type { Hex } from 'viem'
 import type { ChainConfig } from '../chains'
-import { BroadcastError, PreBroadcastError, hexToBigInt, rpcCall, rpcRead, sleep, toHex } from '../rpc'
+import {
+  AmbiguousBroadcastError,
+  BroadcastError,
+  PreBroadcastError,
+  hexToBigInt,
+  isTransientNetworkError,
+  rpcCall,
+  rpcRead,
+  sleep,
+  toHex,
+} from '../rpc'
 
 export interface NativeBalance {
   wei: bigint
@@ -144,15 +154,76 @@ export async function sendNative(chain: ChainConfig, input: NativeSendInput): Pr
       gasPrice,
       nonce: Number(nonce),
     })
-    // 从这里开始结果可能不明；广播只打一次，网络错误不自动重发。
-    broadcastStarted = true
-    const hash = await rpcCall<Hex>(chain.rpc[0], 'eth_sendRawTransaction', [signed])
-    let receipt: Awaited<ReturnType<typeof waitForNativeReceipt>>
-    try {
-      receipt = await waitForNativeReceipt(chain, hash)
-    } catch {
-      receipt = null
+    const txHash = keccak256(signed)
+    const toResult = (
+      receipt: NonNullable<Awaited<ReturnType<typeof waitForNativeReceipt>>>,
+      hash: Hex,
+    ): NativeSendResult => {
+      if (receipt.status === 'failed') {
+        throw new BroadcastError(`交易已上链但执行失败，金额未转出；哈希 ${hash}`, hash)
+      }
+      return {
+        status: 'success',
+        hash,
+        from,
+        to: input.to,
+        amount: input.amount,
+        gasUsed: receipt.gasUsed,
+        effectiveGasPrice: receipt.effectiveGasPrice,
+        fee: formatEther(receipt.gasUsed * receipt.effectiveGasPrice),
+      }
     }
+
+    // 广播响应可能丢失：先按本地交易哈希查回执，再决定是否重发。
+    broadcastStarted = true
+    const delays = [4_000, 10_000, 18_000]
+    let hash: Hex | null = null
+    let lastError: unknown = null
+    for (let attempt = 0; attempt <= delays.length; attempt += 1) {
+      try {
+        hash = await rpcCall<Hex>(chain.rpc[0], 'eth_sendRawTransaction', [signed])
+        break
+      } catch (err) {
+        lastError = err
+        const receipt = await waitForNativeReceipt(chain, txHash, 8_000).catch(() => null)
+        if (receipt) return toResult(receipt, txHash)
+        const known = await rpcRead<{ hash?: Hex } | null>(
+          chain.rpc,
+          'eth_getTransactionByHash',
+          [txHash],
+        ).catch(() => null)
+        if (known) {
+          const pendingReceipt = await waitForNativeReceipt(chain, txHash, 120_000).catch(() => null)
+          if (pendingReceipt) return toResult(pendingReceipt, txHash)
+          return {
+            status: 'pending',
+            hash: txHash,
+            from,
+            to: input.to,
+            amount: input.amount,
+            gasUsed: 0n,
+            effectiveGasPrice: gasPrice,
+            fee: '待确认',
+          }
+        }
+        if (!isTransientNetworkError(err)) {
+          throw new PreBroadcastError(
+            `${chain.short} 发送被拒绝：${err instanceof Error ? err.message : String(err)}`,
+            err,
+          )
+        }
+        if (attempt === delays.length) break
+        await sleep(delays[attempt])
+      }
+    }
+    if (!hash) {
+      throw new AmbiguousBroadcastError(
+        `${chain.short} 发送结果不明：${lastError instanceof Error ? lastError.message : String(lastError)}`,
+        undefined,
+        txHash,
+      )
+    }
+    const receipt = await waitForNativeReceipt(chain, hash).catch(() => null)
     if (!receipt) {
       return {
         status: 'pending',
@@ -165,19 +236,7 @@ export async function sendNative(chain: ChainConfig, input: NativeSendInput): Pr
         fee: '待确认',
       }
     }
-    if (receipt.status === 'failed') {
-      throw new BroadcastError(`交易已上链但执行失败，金额未转出；哈希 ${hash}`, hash)
-    }
-    return {
-      status: 'success',
-      hash,
-      from,
-      to: input.to,
-      amount: input.amount,
-      gasUsed: receipt.gasUsed,
-      effectiveGasPrice: receipt.effectiveGasPrice,
-      fee: formatEther(receipt.gasUsed * receipt.effectiveGasPrice),
-    }
+    return toResult(receipt, hash)
   } catch (err) {
     if (!broadcastStarted && !(err instanceof BroadcastError)) {
       throw new PreBroadcastError(

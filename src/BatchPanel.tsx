@@ -20,6 +20,8 @@ import type {
 } from './evm/batch'
 import { estimateNativeTransfer, getNativeBalance, getNativeGasPrice, sendNative } from './evm/native'
 import { getAaOverview, getBundlerGasPrice, sendAaTransfer } from './evm/op'
+import { reconcileErc20Batch, reconcileUserOps } from './evm/reconcile'
+import type { ReconcileOutcome } from './evm/reconcile'
 import { BroadcastError, rpcRead } from './rpc'
 
 interface Props {
@@ -153,6 +155,7 @@ export default function BatchPanel({ wallets, chain, aaChain, asset, defaultWall
   const [storedAsset, setStoredAsset] = useState('')
   const [running, setRunning] = useState(false)
   const [diagnosing, setDiagnosing] = useState(false)
+  const [reconciling, setReconciling] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
 
@@ -273,6 +276,70 @@ export default function BatchPanel({ wallets, chain, aaChain, asset, defaultWall
       ),
     )
     await execute(targets)
+  }
+
+  const reconcile = async () => {
+    if (!aaChain) return
+    const pending = items.filter(
+      (item) => item.status === 'unknown' || (item.status === 'failed' && !item.broadcasted),
+    )
+    if (!pending.length) {
+      setNotice('没有需要核对的结果不明项')
+      return
+    }
+    setReconciling(true)
+    setError('')
+    setNotice('正在按 UserOp 回执与 USDC Transfer 日志核对…')
+    try {
+      const outcomes = new Map<string, ReconcileOutcome>()
+      for (const outcome of await reconcileUserOps(aaChain, pending)) outcomes.set(outcome.id, outcome)
+      const remaining = pending.filter((item) => {
+        const outcome = outcomes.get(item.id)
+        // 有 UserOp 哈希但暂无回执：可能仍在打包，保持不明，不交给日志判失败。
+        if (outcome?.status === 'unknown' && item.userOpHash) return false
+        return !outcome || outcome.status === 'unknown'
+      })
+      if (remaining.length) {
+        for (const outcome of await reconcileErc20Batch(aaChain, remaining)) {
+          outcomes.set(outcome.id, outcome)
+        }
+      }
+
+      const results = [...outcomes.values()]
+      const success = results.filter((outcome) => outcome.status === 'success').length
+      const notFound = results.filter((outcome) => outcome.status === 'failed').length
+      const unknown = results.filter((outcome) => outcome.status === 'unknown').length
+      setItems((old) =>
+        old.map((item) => {
+          const outcome = outcomes.get(item.id)
+          if (!outcome) return item
+          if (outcome.status === 'success') {
+            return {
+              ...item,
+              status: 'success' as const,
+              broadcasted: true,
+              hash: outcome.hash ?? item.hash,
+              error: undefined,
+            }
+          }
+          if (outcome.status === 'failed') {
+            return {
+              ...item,
+              status: 'failed' as const,
+              broadcasted: false,
+              error: outcome.note,
+            }
+          }
+          return { ...item, error: outcome.note }
+        }),
+      )
+      setNotice(`核对完成：成功 ${success} · 未找到 ${notFound} · 仍不明 ${unknown}`)
+    } catch (err) {
+      setNotice('')
+      setError(`核对失败：${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setReconciling(false)
+    }
   }
 
   const diagnose = async () => {
@@ -401,6 +468,15 @@ export default function BatchPanel({ wallets, chain, aaChain, asset, defaultWall
         <button className="primary" onClick={() => void start()} disabled={running || !wallets.length}>
           {running ? '批量执行中…' : '开始批量转账'}
         </button>
+        {aaChain ? (
+          <button
+            className="ghost"
+            onClick={() => void reconcile()}
+            disabled={running || reconciling}
+          >
+            {reconciling ? '核对中…' : '核对结果不明项'}
+          </button>
+        ) : null}
         <button className="ghost" onClick={() => void diagnose()} disabled={running || diagnosing}>
           {diagnosing ? '检测中…' : '网络诊断'}
         </button>
@@ -411,7 +487,8 @@ export default function BatchPanel({ wallets, chain, aaChain, asset, defaultWall
 
       <p className="small muted">
         同一发送钱包串行（AA ≥1.5s / BSC ≥0.8s），不同钱包最多 3 个并发；每笔广播前检查余额与手续费上限。
-        已广播的失败笔不会自动重发。
+        公共 Pimlico 约 12 次/分钟会限流（约 30 秒恢复），本页已把 bundler 请求节流到 6 秒/次；
+        9 笔批量约 4 分钟，请勿关闭页面。已广播的失败笔不会自动重发；结果不明项可点「核对结果不明项」。
       </p>
       {storedAsset && storedAsset !== assetSymbol ? (
         <p className="small muted">上次批次资产：{storedAsset}（重试仍按该资产）</p>

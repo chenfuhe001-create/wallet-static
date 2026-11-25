@@ -24,7 +24,15 @@ import { privateKeyToAccount } from 'viem/accounts'
 import type { Hex } from 'viem'
 import { feeCapFor, getAsset } from '../chains'
 import type { AaChainConfig, TokenAsset } from '../chains'
-import { PreBroadcastError, rpcCall, rpcRead, sleep, type RpcEndpoint } from '../rpc'
+import {
+  AmbiguousBroadcastError,
+  PreBroadcastError,
+  isTransientNetworkError,
+  rpcCall,
+  rpcRead,
+  sleep,
+  type RpcEndpoint,
+} from '../rpc'
 
 const USEROP_TYPEHASH = keccak256(
   stringToHex(
@@ -57,6 +65,48 @@ const MAX_UINT256 = (1n << 256n) - 1n
 
 function bundlerEndpoint(chain: AaChainConfig): RpcEndpoint {
   return { url: chain.bundler, label: 'Pimlico' }
+}
+
+// 公共 Pimlico 约 12 次/分钟就会触发 WAF，随后约 30 秒内全是 Failed to fetch。
+// 所有 bundler 请求走同一队列，6 秒一次；9 笔批量约 4 分钟，宁可慢也不能断。
+const BUNDLER_MIN_INTERVAL_MS = 6_000
+let bundlerQueue: Promise<unknown> = Promise.resolve()
+let lastBundlerCallAt = 0
+
+async function bundlerCall<T>(
+  chain: AaChainConfig,
+  method: string,
+  params: unknown[] = [],
+  timeoutMs = 30_000,
+): Promise<T> {
+  const run = async () => {
+    const wait = Math.max(0, BUNDLER_MIN_INTERVAL_MS - (Date.now() - lastBundlerCallAt))
+    if (wait > 0) await sleep(wait)
+    lastBundlerCallAt = Date.now()
+    return rpcCall<T>(bundlerEndpoint(chain), method, params, timeoutMs)
+  }
+  const result = bundlerQueue.then(run, run)
+  bundlerQueue = result.then(
+    () => undefined,
+    () => undefined,
+  )
+  return result
+}
+
+async function withTransientRetry<T>(fn: () => Promise<T>, attempts = 4): Promise<T> {
+  // 公共 Pimlico 的 WAF 通常封 30 秒；退避总时长要覆盖一次冷却。
+  const delays = [5_000, 12_000, 25_000]
+  let last: unknown
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await fn()
+    } catch (err) {
+      last = err
+      if (!isTransientNetworkError(err) || attempt === attempts - 1) throw err
+      await sleep(delays[Math.min(attempt, delays.length - 1)])
+    }
+  }
+  throw last
 }
 
 export interface AaDelegation {
@@ -190,28 +240,44 @@ export async function getAaOverview(chain: AaChainConfig, address: string): Prom
   }
 }
 
+const gasPriceCache = new Map<
+  number,
+  { at: number; value: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint } }
+>()
+const GAS_PRICE_TTL_MS = 15_000
+
 export async function getBundlerGasPrice(
   chain: AaChainConfig,
 ): Promise<{ maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }> {
-  const endpoint = bundlerEndpoint(chain)
+  const cached = gasPriceCache.get(chain.id)
+  if (cached && Date.now() - cached.at < GAS_PRICE_TTL_MS) return cached.value
   try {
-    const result = await rpcCall<{
+    const result = await bundlerCall<{
       standard?: { maxFeePerGas: Hex; maxPriorityFeePerGas: Hex }
       fast?: { maxFeePerGas: Hex; maxPriorityFeePerGas: Hex }
       slow?: { maxFeePerGas: Hex; maxPriorityFeePerGas: Hex }
-    }>(endpoint, 'pimlico_getUserOperationGasPrice', [], 30_000)
+    }>(chain, 'pimlico_getUserOperationGasPrice', [], 30_000)
     const bucket = result.standard || result.fast || result.slow
     if (bucket) {
       const maxFeePerGas = hexToBigInt(bucket.maxFeePerGas)
       const maxPriorityFeePerGas = hexToBigInt(bucket.maxPriorityFeePerGas)
-      if (maxFeePerGas > 0n) return { maxFeePerGas, maxPriorityFeePerGas }
+      if (maxFeePerGas > 0n) {
+        const value = { maxFeePerGas, maxPriorityFeePerGas }
+        gasPriceCache.set(chain.id, { at: Date.now(), value })
+        return value
+      }
     }
   } catch {
     /* fallback */
   }
   const gasPrice = hexToBigInt(await rpcRead<Hex>(chain.rpc, 'eth_gasPrice', []))
   if (gasPrice <= 0n) throw new Error(`无法获取 ${chain.short} gasPrice`)
-  return { maxFeePerGas: gasPrice, maxPriorityFeePerGas: gasPrice < 1_000_000_000n ? gasPrice : 1_000_000_000n }
+  const value = {
+    maxFeePerGas: gasPrice,
+    maxPriorityFeePerGas: gasPrice < 1_000_000_000n ? gasPrice : 1_000_000_000n,
+  }
+  gasPriceCache.set(chain.id, { at: Date.now(), value })
+  return value
 }
 
 interface PaymasterState {
@@ -220,18 +286,25 @@ interface PaymasterState {
   additionalGasCharge: bigint
 }
 
+const paymasterCache = new Map<number, { at: number; value: PaymasterState }>()
+const PAYMASTER_TTL_MS = 30_000
+
 export async function getPaymasterState(chain: AaChainConfig): Promise<PaymasterState> {
+  const cached = paymasterCache.get(chain.id)
+  if (cached && Date.now() - cached.at < PAYMASTER_TTL_MS) return cached.value
   const [price, spread, additional] = await Promise.all([
     readUint(chain, chain.paymaster, FETCH_PRICE_SELECTOR),
     readUint(chain, chain.paymaster, FEE_SPREAD_SELECTOR),
     readUint(chain, chain.paymaster, ADDITIONAL_GAS_SELECTOR),
   ])
   if (price <= 0n) throw new Error('Circle Paymaster 价格预言机不可读')
-  return {
+  const value = {
     nativeTokenPrice: price,
     feeSpreadBips: spread > 1000n ? spread : 1000n,
     additionalGasCharge: additional > 0n ? additional : 35_000n,
   }
+  paymasterCache.set(chain.id, { at: Date.now(), value })
+  return value
 }
 
 function estimatePrefund(input: {
@@ -404,11 +477,15 @@ async function signAuthorization(
 }
 
 async function estimateUserOpGas(chain: AaChainConfig, op: UserOpJson): Promise<Record<string, bigint>> {
-  const result = await rpcCall<Record<string, string>>(
-    bundlerEndpoint(chain),
-    'eth_estimateUserOperationGas',
-    [op, chain.entrypoint],
-    45_000,
+  const result = await withTransientRetry(
+    () =>
+      bundlerCall<Record<string, string>>(
+        chain,
+        'eth_estimateUserOperationGas',
+        [op, chain.entrypoint],
+        45_000,
+      ),
+    3,
   )
   const out: Record<string, bigint> = {}
   for (const field of [
@@ -427,15 +504,16 @@ async function estimateUserOpGas(chain: AaChainConfig, op: UserOpJson): Promise<
   return out
 }
 
-async function waitForUserOpReceipt(
+export async function waitForUserOpReceipt(
   chain: AaChainConfig,
   hash: Hex,
   timeoutMs = 120_000,
+  pollMs = 5_000,
 ): Promise<AaTransferResult | null> {
   const start = Date.now()
   while (Date.now() - start < timeoutMs) {
     try {
-      const receipt = await rpcCall<{
+      const receipt = await bundlerCall<{
         success?: boolean
         actualGasCost?: Hex
         logs?: Array<{ address?: string; topics?: string[]; data?: Hex }>
@@ -444,7 +522,7 @@ async function waitForUserOpReceipt(
           status?: Hex
           logs?: Array<{ address?: string; topics?: string[]; data?: Hex }>
         }
-      } | null>(bundlerEndpoint(chain), 'eth_getUserOperationReceipt', [hash], 30_000)
+      } | null>(chain, 'eth_getUserOperationReceipt', [hash], 30_000)
       if (receipt) {
         const txHash = receipt.receipt?.transactionHash
         let feeUsdc: string | undefined
@@ -481,9 +559,9 @@ async function waitForUserOpReceipt(
         }
       }
     } catch {
-      /* bundler 只读 429 时继续等 */
+      /* bundler 限流/网络抖动时继续等 */
     }
-    await sleep(3000)
+    await sleep(pollMs)
   }
   return null
 }
@@ -661,15 +739,42 @@ export async function sendAaTransfer(
     signature,
     authorization,
   })
-  // 从这里开始结果可能不明；之后的网络错误不能自动重发。
+  // 从这里开始结果可能不明：先按 userOpHash 查回执，再决定是否重试。
   broadcastStarted = true
-  const returnedHash = await rpcCall<Hex>(
-    bundlerEndpoint(chain),
-    'eth_sendUserOperation',
-    [finalOp, chain.entrypoint],
-    45_000,
-  )
-  const receipt = await waitForUserOpReceipt(chain, returnedHash)
+  const delays = [6_000, 15_000, 30_000]
+  let returnedHash: Hex | null = null
+  let lastError: unknown = null
+  for (let attempt = 0; attempt <= delays.length; attempt += 1) {
+    try {
+      returnedHash = await bundlerCall<Hex>(
+        chain,
+        'eth_sendUserOperation',
+        [finalOp, chain.entrypoint],
+        45_000,
+      )
+      break
+    } catch (err) {
+      lastError = err
+      // 响应丢失时 UserOp 可能已经上链；同 nonce 重发前必须先查回执。
+      const mined = await waitForUserOpReceipt(chain, userOpHash, 8_000, 2_000).catch(() => null)
+      if (mined) return mined
+      if (!isTransientNetworkError(err)) {
+        throw new PreBroadcastError(
+          `${chain.short} 发送被拒绝：${err instanceof Error ? err.message : String(err)}`,
+          err,
+        )
+      }
+      if (attempt === delays.length) break
+      await sleep(delays[attempt])
+    }
+  }
+  if (!returnedHash) {
+    throw new AmbiguousBroadcastError(
+      `${chain.short} 发送结果不明：${lastError instanceof Error ? lastError.message : String(lastError)}`,
+      userOpHash,
+    )
+  }
+  const receipt = await waitForUserOpReceipt(chain, returnedHash, 180_000)
   return (
     receipt ?? {
       userOpHash: returnedHash,

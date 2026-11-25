@@ -8,7 +8,7 @@
  */
 
 import { isAddress } from 'viem'
-import { PreBroadcastError } from '../rpc'
+import { AmbiguousBroadcastError, PreBroadcastError } from '../rpc'
 
 export type BatchMode = 'one-to-many' | 'many-to-one'
 
@@ -217,6 +217,18 @@ export async function runBatch(
           if (err instanceof PreBroadcastError) {
             // 读 RPC/估算/签名阶段失败：交易肯定没发出，可以安全重试。
             update(item, { status: 'failed', broadcasted: false, error: err.message })
+            continue
+          }
+          if (err instanceof AmbiguousBroadcastError) {
+            // 广播响应丢失：保留 userOpHash/交易哈希，供后续按哈希核对。
+            update(item, {
+              status: 'unknown',
+              broadcasted: true,
+              hash: err.txHash,
+              userOpHash: err.userOpHash,
+              error: err.message,
+            })
+            blocked = '上一笔发送结果不明'
             continue
           }
           // 广播调用抛错时无法判断请求是否已到 bundler/RPC：按“结果不明”处理，

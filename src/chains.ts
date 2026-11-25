@@ -294,6 +294,12 @@ export function feeCapFor(chain: AaChainConfig, firstActivation: boolean): bigin
   return parseUnits(firstActivation ? chain.firstFeeCapUsdc : chain.feeCapUsdc, 6)
 }
 
+/** `native` 或当前链原生符号；所有链都用 chain.native.symbol，避免硬编码 ETH。 */
+export function isNativeAssetSymbol(chain: ChainConfig, symbol: string): boolean {
+  const value = symbol.trim().toLowerCase()
+  return value === 'native' || value === chain.native.symbol.toLowerCase()
+}
+
 /** 转账资产只从注册表取；未登记资产直接拒绝，不接受前端传地址。 */
 export function getAsset(chain: AaChainConfig, symbol: string): TokenAsset {
   const wanted = symbol.trim().toUpperCase()

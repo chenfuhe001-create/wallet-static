@@ -11,6 +11,7 @@ import {
   getAaChain,
   getAsset,
   getChain,
+  isNativeAssetSymbol,
 } from '../src/chains'
 
 const FIXED = {
@@ -91,6 +92,17 @@ describe('多链注册表', () => {
     expect(() => getAaChain('bsc')).toThrow('普通转账')
     expect(() => getAaChain('ethereum-native')).toThrow('普通转账')
     expect(() => getAaChain('unknown-chain')).toThrow('不支持')
+  })
+
+  it('原生币标识按链取符号，覆盖所有链', () => {
+    for (const chain of CHAINS) {
+      expect(isNativeAssetSymbol(chain, chain.native.symbol)).toBe(true)
+      expect(isNativeAssetSymbol(chain, 'native')).toBe(true)
+      expect(isNativeAssetSymbol(chain, 'USDC')).toBe(false)
+    }
+    expect(CHAINS.map((chain) => chain.native.symbol)).toContain('BNB')
+    expect(CHAINS.map((chain) => chain.native.symbol)).toContain('POL')
+    expect(CHAINS.map((chain) => chain.native.symbol)).toContain('AVAX')
   })
 
   it('资产只能从注册表取，未登记资产直接拒绝', () => {

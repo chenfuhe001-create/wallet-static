@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
 import { parseUnits } from 'viem'
 import type { Hex } from 'viem'
-import { feeCapFor, getAsset } from './chains'
-import type { AaChainConfig, ChainConfig, TokenAsset } from './chains'
+import { feeCapFor, getAsset, isNativeAssetSymbol } from './chains'
+import type { AaChainConfig, ChainConfig } from './chains'
 import { clearBatch, loadBatch, saveBatch } from './batchStorage'
 import {
   buildPlan,
@@ -30,7 +30,8 @@ interface Props {
   wallets: Array<{ id: number; address: string; privateKey: Hex; label: string }>
   chain: ChainConfig
   aaChain: AaChainConfig | null
-  asset: TokenAsset | null
+  /** 当前转账资产；AA 链可以是原生符号（如 ETH/POL/AVAX）或注册表里的代币。 */
+  assetSymbol: string
   defaultWalletId: number | null
 }
 
@@ -103,16 +104,28 @@ function makeAdapters(
     }
 
     const aa = aaChain
+    const nativeTransfer = isNativeAssetSymbol(aa, assetSymbol)
+    const token = nativeTransfer ? null : getAsset(aa, assetSymbol)
     adapters.set(wallet.address, {
       address: wallet.address,
       minIntervalMs: 1500,
       async precheck(amount) {
-        const token = getAsset(aa, assetSymbol)
         const overview = await getAaOverview(aa, wallet.address)
         const cap = feeCapFor(aa, overview.delegation.status === 'none')
         const balanceOf = (symbol: string) =>
-          parseUnits(overview.assets.find((item) => item.symbol === symbol)?.balance ?? '0', 6)
-        const value = parseUnits(amount, token.decimals)
+          parseUnits(
+            overview.assets.find((item) => item.symbol === symbol)?.balance ?? '0',
+            aa.feeToken.decimals,
+          )
+        const value = parseUnits(amount, token ? token.decimals : aa.native.decimals)
+        if (!token) {
+          const nativeBalance = parseUnits(overview.native, aa.native.decimals)
+          if (nativeBalance < value) return `${aa.native.symbol} 余额不足`
+          if (balanceOf(aa.feeToken.symbol) < cap) {
+            return `${aa.feeToken.symbol} 余额不足以支付手续费上限`
+          }
+          return null
+        }
         const feeIsAsset = token.address.toLowerCase() === aa.feeToken.address.toLowerCase()
         if (feeIsAsset) {
           if (balanceOf(aa.feeToken.symbol) < value + cap) {
@@ -147,7 +160,7 @@ function makeAdapters(
   return adapters
 }
 
-export default function BatchPanel({ wallets, chain, aaChain, asset, defaultWalletId }: Props) {
+export default function BatchPanel({ wallets, chain, aaChain, assetSymbol, defaultWalletId }: Props) {
   const [mode, setMode] = useState<BatchMode>('one-to-many')
   const [senderId, setSenderId] = useState<number | null>(defaultWalletId ?? wallets[0]?.id ?? null)
   const [senderIds, setSenderIds] = useState<number[]>([])
@@ -162,8 +175,6 @@ export default function BatchPanel({ wallets, chain, aaChain, asset, defaultWall
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [bundler, setBundler] = useState(() => getBundlerThrottleStatus())
-
-  const assetSymbol = asset?.symbol ?? chain.native.symbol
 
   useEffect(() => {
     const timer = window.setInterval(() => setBundler(getBundlerThrottleStatus()), 1_000)

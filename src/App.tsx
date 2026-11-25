@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import type { Hex } from 'viem'
-import { BSC, CHAINS, feeCapFor, getChain, isAaChain } from './chains'
+import { BSC, CHAINS, feeCapFor, getChain, isAaChain, isNativeAssetSymbol } from './chains'
 import type { AaChainConfig } from './chains'
 import {
   addWallet,
@@ -117,7 +117,15 @@ export default function App() {
   // 链只从注册表按 key 取；普通转账链（BSC / Ethereum）与 AA 链分开。
   const chain = getChain(chainKey) ?? BSC
   const aaChain: AaChainConfig | null = isAaChain(chain) ? chain : null
-  const asset = aaChain ? (aaChain.assets.find((a) => a.symbol === assetSymbol) ?? aaChain.feeToken) : null
+  const nativeTransfer = Boolean(aaChain && isNativeAssetSymbol(aaChain, assetSymbol))
+  const asset = aaChain && !nativeTransfer
+    ? aaChain.assets.find((a) => a.symbol === assetSymbol) ?? null
+    : null
+  const transferSymbol = aaChain
+    ? nativeTransfer
+      ? aaChain.native.symbol
+      : asset?.symbol ?? aaChain.feeToken.symbol
+    : chain.native.symbol
   const selectedOverview =
     aaChain && selected ? overviews[`${chain.key}:${selected.address}`] : undefined
 
@@ -293,7 +301,15 @@ export default function App() {
   useEffect(() => {
     // 切换链后旧表单/资产不能沿用；余额按新链重新读。
     setTransfer(EMPTY_TRANSFER)
-    if (aaChain && !aaChain.assets.some((item) => item.symbol === assetSymbol)) setAssetSymbol('USDC')
+    const next = getChain(chainKey) ?? BSC
+    if (isAaChain(next)) {
+      const valid =
+        isNativeAssetSymbol(next, assetSymbol) ||
+        next.assets.some((item) => item.symbol === assetSymbol)
+      if (!valid) setAssetSymbol(next.feeToken.symbol)
+    } else {
+      setAssetSymbol(next.native.symbol)
+    }
     if (opened) void refreshBalances(opened)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chainKey])
@@ -430,11 +446,13 @@ export default function App() {
   }
 
   const sendAa = async () => {
-    if (!selected || !aaChain || !asset) return
+    if (!selected || !aaChain) return
+    const symbol = nativeTransfer ? aaChain.native.symbol : asset?.symbol
+    if (!symbol) return
     const cap = feeCapFor(aaChain, selectedOverview?.delegation.status === 'none')
     if (
       !window.confirm(
-        `确认从 ${selected.address} 在 ${aaChain.name} 转出 ${transfer.amount} ${asset.symbol} 到 ${transfer.to}？\n\n` +
+        `确认从 ${selected.address} 在 ${aaChain.name} 转出 ${transfer.amount} ${symbol} 到 ${transfer.to}？\n\n` +
           `gas 用 USDC 支付；本次手续费上限 ${Number(cap) / 1e6} USDC。\n交易在本地签名，不可撤销。`,
       )
     ) {
@@ -446,13 +464,13 @@ export default function App() {
         privateKey: selected.privateKey,
         to: transfer.to,
         amount: transfer.amount,
-        asset: asset.symbol,
+        asset: symbol,
       })
       setTransfer((s) => ({
         ...s,
         busy: false,
         result: [
-          `${aaChain.short} · ${asset.symbol}`,
+          `${aaChain.short} · ${symbol}`,
           `UserOp：${res.userOpHash}`,
           res.txHash ? `交易：${res.txHash}` : '',
           res.feeUsdc ? `手续费：${res.feeUsdc} USDC` : '',
@@ -626,25 +644,14 @@ export default function App() {
             </option>
           ))}
         </select>
-        {aaChain
-          ? aaChain.assets.map((a) => {
-              const balance = selectedOverview?.assets.find((item) => item.symbol === a.symbol)?.balance
-              return (
-                <button
-                  key={a.symbol}
-                  className={a.symbol === asset?.symbol ? 'primary' : 'ghost'}
-                  onClick={() => setAssetSymbol(a.symbol)}
-                >
-                  {a.symbol}
-                  {balance !== undefined ? ` ${balance}` : ''}
-                </button>
-              )
-            })
-          : null}
-        <button className="ghost" onClick={() => changeChain(DEFAULT_CHAIN_KEY)}>
-          默认 ETH AA
-        </button>
-        <span className="small muted">默认链保存在本机，切换只影响查询/转账，不改钱包</span>
+        <span className="small muted">
+          默认链：{chain.name}{aaChain ? ' · AA' : ''}（已保存在本机）
+        </span>
+        {chainKey !== DEFAULT_CHAIN_KEY ? (
+          <button className="ghost" onClick={() => changeChain(DEFAULT_CHAIN_KEY)}>
+            恢复默认
+          </button>
+        ) : null}
       </div>
 
       {notice ? <div className="notice">{notice}</div> : null}
@@ -790,7 +797,7 @@ export default function App() {
         wallets={activeWallets}
         chain={chain}
         aaChain={aaChain}
-        asset={asset}
+        assetSymbol={transferSymbol}
         defaultWalletId={selected?.id ?? null}
       />
 
@@ -839,9 +846,26 @@ export default function App() {
           ) : aaChain ? (
           <section className="card">
             <div className="row space">
-              <h2>转账 · {aaChain.name} · {asset?.symbol}</h2>
+              <h2>转账 · {aaChain.name} · {transferSymbol}</h2>
               <span className="small muted">#{selected.id} {short(selected.address)}</span>
             </div>
+            <label className="small muted" htmlFor="transferAsset">转账资产</label>
+            <select
+              id="transferAsset"
+              className="select"
+              value={nativeTransfer ? aaChain.native.symbol : asset?.symbol ?? ''}
+              onChange={(e) => setAssetSymbol(e.target.value)}
+              disabled={transfer.busy}
+            >
+              <option value={aaChain.native.symbol}>
+                {aaChain.native.symbol}（原生币）
+              </option>
+              {aaChain.assets.map((item) => (
+                <option key={item.symbol} value={item.symbol}>
+                  {item.symbol}
+                </option>
+              ))}
+            </select>
             <p className="small muted">
               {aaChain.assets
                 .map(
@@ -866,17 +890,20 @@ export default function App() {
             <input
               value={transfer.amount}
               onChange={(e) => setTransfer((s) => ({ ...s, amount: e.target.value }))}
-              placeholder={`金额（${asset?.symbol ?? ''}）`}
+              placeholder={`金额（${transferSymbol}）`}
               inputMode="decimal"
             />
             <div className="row">
-              <button className="primary" onClick={() => void sendAa()} disabled={transfer.busy || !asset}>
+              <button className="primary" onClick={() => void sendAa()} disabled={transfer.busy}>
                 {transfer.busy ? '签名/提交中…' : '本地签名并提交 UserOp'}
               </button>
             </div>
             {transfer.result ? <pre className="result">{transfer.result}</pre> : null}
             {transfer.error ? <div className="error">{transfer.error}</div> : null}
             <p className="small muted">
+              {nativeTransfer
+                ? `原生 ${aaChain.native.symbol} 从本账户余额转出；gas 仍用 USDC 支付。`
+                : ''}
               gas 用 USDC 支付（permit 上限 {aaChain.feeCapUsdc}，首次激活 {aaChain.firstFeeCapUsdc} USDC）；
               permit/UserOp/7702 授权全部本地签名，bundler 只收到已签名 UserOp。建议先用 0.01 验证。
             </p>

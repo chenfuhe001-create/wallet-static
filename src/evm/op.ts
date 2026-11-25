@@ -22,7 +22,7 @@ import {
 } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import type { Hex } from 'viem'
-import { feeCapFor, getAsset } from '../chains'
+import { feeCapFor, getAsset, isNativeAssetSymbol } from '../chains'
 import type { AaChainConfig, TokenAsset } from '../chains'
 import {
   AmbiguousBroadcastError,
@@ -87,7 +87,7 @@ export interface AaTransferInput {
   privateKey: Hex
   to: string
   amount: string
-  /** 资产符号，只认链注册表里登记过的资产。 */
+  /** 资产符号；`native` 或链原生符号表示原生币，其余必须是注册表代币。 */
   asset: string
 }
 
@@ -122,6 +122,17 @@ export function encodeExecute(target: string, value: bigint, data: Hex): Hex {
       [target as Hex, value, data],
     ),
   ])
+}
+
+/** 代币：execute(token, 0, transfer(to, amount))；原生币：execute(to, amount, 0x)。 */
+export function encodeAaTransferCallData(
+  token: TokenAsset | null,
+  to: string,
+  amount: bigint,
+): Hex {
+  return token
+    ? encodeExecute(token.address, 0n, encodeErc20Transfer(to, amount))
+    : encodeExecute(to, amount, '0x')
 }
 
 export function packPaymasterAndData(paymaster: string, verification: bigint, postOp: bigint, data: Hex): Hex {
@@ -161,6 +172,10 @@ async function readTokenBalance(chain: AaChainConfig, token: TokenAsset, owner: 
     token.address,
     concat([BALANCE_OF_SELECTOR, encodeAbiParameters([{ type: 'address' }], [owner as Hex])]),
   )
+}
+
+async function readNativeBalance(chain: AaChainConfig, owner: string): Promise<bigint> {
+  return hexToBigInt(await rpcRead<Hex>(chain.rpc, 'eth_getBalance', [owner, 'latest']))
 }
 
 export async function getDelegation(chain: AaChainConfig, address: string): Promise<AaDelegation> {
@@ -470,10 +485,10 @@ const GAS_ESTIMATE_TTL_MS = 10 * 60_000
 export function gasEstimateKey(
   chain: AaChainConfig,
   firstActivation: boolean,
-  token: TokenAsset,
+  assetKey: string,
   calls = 1,
 ): string {
-  return `${chain.id}:${firstActivation ? 'first' : 'delegated'}:${token.address.toLowerCase()}:${calls}`
+  return `${chain.id}:${firstActivation ? 'first' : 'delegated'}:${assetKey}:${calls}`
 }
 
 /** 复用估算结果时加缓冲：冷收款地址、不同钱包的签名/授权差异都可能多耗 gas。 */
@@ -704,8 +719,9 @@ export async function sendAaTransfer(
   let broadcastStarted = false
   try {
   if (!isAddress(input.to)) throw new Error('收款地址格式不正确')
-  const token = getAsset(chain, input.asset)
-  const amount = parseUnits(input.amount || '0', token.decimals)
+  const nativeTransfer = isNativeAssetSymbol(chain, input.asset)
+  const token = nativeTransfer ? null : getAsset(chain, input.asset)
+  const amount = parseUnits(input.amount || '0', token ? token.decimals : chain.native.decimals)
   if (amount <= 0n) throw new Error('金额必须大于 0')
 
   const account = privateKeyToAccount(input.privateKey)
@@ -724,17 +740,21 @@ export async function sendAaTransfer(
   const firstActivation = delegation.status === 'none'
 
   const cap = feeCapFor(chain, firstActivation)
-  const [feeBalance, assetBalance] = await Promise.all([
+  const feeTokenIsAsset = Boolean(
+    token && token.address.toLowerCase() === chain.feeToken.address.toLowerCase(),
+  )
+  const [feeBalance, assetBalance, nativeBalance] = await Promise.all([
     readTokenBalance(chain, chain.feeToken, sender),
-    token.address.toLowerCase() === chain.feeToken.address.toLowerCase()
-      ? Promise.resolve(0n)
-      : readTokenBalance(chain, token, sender),
+    token && !feeTokenIsAsset ? readTokenBalance(chain, token, sender) : Promise.resolve(0n),
+    token ? Promise.resolve(0n) : readNativeBalance(chain, sender),
   ])
-  const feeTokenIsAsset = token.address.toLowerCase() === chain.feeToken.address.toLowerCase()
   if (feeTokenIsAsset ? feeBalance < amount + cap : feeBalance < cap) {
     throw new Error(`${chain.feeToken.symbol} 余额不足以支付手续费上限`)
   }
-  if (!feeTokenIsAsset && assetBalance < amount) throw new Error(`${token.symbol} 余额不足`)
+  if (token && !feeTokenIsAsset && assetBalance < amount) {
+    throw new Error(`${token.symbol} 余额不足`)
+  }
+  if (!token && nativeBalance < amount) throw new Error(`${chain.native.symbol} 余额不足`)
 
   const [entrypointNonce, fee, tokenName, tokenVersion, permitNonce] = await Promise.all([
     getEntryPointNonce(chain, sender),
@@ -780,7 +800,7 @@ export async function sendAaTransfer(
   })
 
   const pmData = packPaymasterData(chain.feeToken.address, cap, permitSignature)
-  const callData = encodeExecute(token.address, 0n, encodeErc20Transfer(input.to, amount))
+  const callData = encodeAaTransferCallData(token, input.to, amount)
 
   const estimateOp = buildUserOp(chain, {
     sender,
@@ -797,7 +817,7 @@ export async function sendAaTransfer(
     signature: STUB_SIGNATURE,
     authorization,
   })
-  const cacheKey = gasEstimateKey(chain, firstActivation, token)
+  const cacheKey = gasEstimateKey(chain, firstActivation, token ? token.address.toLowerCase() : 'native')
   const cachedEstimate = gasEstimateCache.get(cacheKey)
   let est: Record<string, bigint>
   let reusedEstimate = false
@@ -865,7 +885,10 @@ export async function sendAaTransfer(
   if (feeTokenIsAsset ? feeBalance < amount + prefund : feeBalance < prefund) {
     throw new Error(`${chain.feeToken.symbol} 余额不足以支付实际手续费`)
   }
-  if (!feeTokenIsAsset && assetBalance < amount) throw new Error(`${token.symbol} 余额不足`)
+  if (token && !feeTokenIsAsset && assetBalance < amount) {
+    throw new Error(`${token.symbol} 余额不足`)
+  }
+  if (!token && nativeBalance < amount) throw new Error(`${chain.native.symbol} 余额不足`)
 
   const userOpHash = computeUserOpHash(
     {

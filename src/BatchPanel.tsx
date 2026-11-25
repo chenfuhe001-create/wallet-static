@@ -7,6 +7,7 @@ import { clearBatch, loadBatch, saveBatch } from './batchStorage'
 import {
   buildPlan,
   isRetryable,
+  mergeRecipientAddresses,
   parseRecipients,
   recoverBatch,
   runBatch,
@@ -150,6 +151,7 @@ export default function BatchPanel({ wallets, chain, aaChain, asset, defaultWall
   const [mode, setMode] = useState<BatchMode>('one-to-many')
   const [senderId, setSenderId] = useState<number | null>(defaultWalletId ?? wallets[0]?.id ?? null)
   const [senderIds, setSenderIds] = useState<number[]>([])
+  const [localRecipientIds, setLocalRecipientIds] = useState<number[]>([])
   const [recipientText, setRecipientText] = useState('')
   const [amount, setAmount] = useState('')
   const [items, setItems] = useState<BatchItem[]>([])
@@ -189,6 +191,12 @@ export default function BatchPanel({ wallets, chain, aaChain, asset, defaultWall
     setSenderIds((old) => (old.includes(id) ? old.filter((item) => item !== id) : [...old, id]))
   }
 
+  const toggleLocalRecipient = (id: number) => {
+    setLocalRecipientIds((old) =>
+      old.includes(id) ? old.filter((item) => item !== id) : [...old, id],
+    )
+  }
+
   const execute = async (planItems: BatchPlanItem[]) => {
     setRunning(true)
     setError('')
@@ -213,11 +221,16 @@ export default function BatchPanel({ wallets, chain, aaChain, asset, defaultWall
       setError(`第 ${parsed.invalid.map((item) => item.line).join('、')} 行不是合法地址：${parsed.invalid[0].value}`)
       return
     }
-    if (!parsed.addresses.length) {
-      setError('请填写至少一个收款地址')
+    const localRecipients =
+      mode === 'one-to-many'
+        ? wallets.filter((wallet) => localRecipientIds.includes(wallet.id)).map((wallet) => wallet.address)
+        : []
+    const recipients = mergeRecipientAddresses(parsed.addresses, localRecipients)
+    if (!recipients.length) {
+      setError(mode === 'one-to-many' ? '请手动填写或勾选至少一个收款地址' : '请填写收款地址')
       return
     }
-    if (mode === 'many-to-one' && parsed.addresses.length !== 1) {
+    if (mode === 'many-to-one' && recipients.length !== 1) {
       setError('多个钱包 → 一个地址只接受 1 个收款地址')
       return
     }
@@ -235,7 +248,7 @@ export default function BatchPanel({ wallets, chain, aaChain, asset, defaultWall
       planItems = buildPlan({
         mode,
         senders,
-        recipients: mode === 'one-to-many' ? parsed.addresses : [parsed.addresses[0]],
+        recipients: mode === 'one-to-many' ? recipients : [recipients[0]],
         amount,
         asset: assetSymbol,
       })
@@ -435,6 +448,28 @@ export default function BatchPanel({ wallets, chain, aaChain, asset, defaultWall
             spellCheck={false}
             disabled={running}
           />
+          <details className="importRow">
+            <summary className="small muted">
+              从本地钱包勾选收款地址（已选 {localRecipientIds.length} 个）
+            </summary>
+            <div className="list">
+              {wallets.map((wallet) => (
+                <label key={wallet.id} className="batchCheck">
+                  <input
+                    type="checkbox"
+                    checked={localRecipientIds.includes(wallet.id)}
+                    onChange={() => toggleLocalRecipient(wallet.id)}
+                    disabled={running}
+                  />
+                  <span>
+                    #{wallet.id} {wallet.label ? `${wallet.label} ` : ''}
+                    <span className="mono small">{short(wallet.address)}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+            <p className="small muted">勾选地址会和上方手动输入合并、自动去重。</p>
+          </details>
         </>
       ) : (
         <>

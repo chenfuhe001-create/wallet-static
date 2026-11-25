@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   buildPlan,
   isRetryable,
+  mergeRecipientAddresses,
   parseRecipients,
   recoverBatch,
   runBatch,
@@ -101,6 +102,14 @@ describe('批量转账：输入解析', () => {
     expect(() =>
       buildPlan({ mode: 'one-to-many', senders: [FROM_A], recipients: [TO_1], amount: '0', asset: 'USDC' }),
     ).toThrow('金额')
+  })
+})
+
+describe('批量转账：收款地址合并', () => {
+  it('手动输入与本地勾选合并、去重并保持顺序', () => {
+    expect(mergeRecipientAddresses([TO_1, TO_2], [TO_2, TO_3])).toEqual([TO_1, TO_2, TO_3])
+    expect(mergeRecipientAddresses([], [TO_3, TO_1])).toEqual([TO_3, TO_1])
+    expect(mergeRecipientAddresses([TO_1], [])).toEqual([TO_1])
   })
 })
 

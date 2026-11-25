@@ -34,6 +34,8 @@ button.danger { background: #450a0a66; border-color: #7f1d1d; color: #fca5a5; }
 .walletRow.active { border-color: #0891b2; background: #08334444; }
 .walletTitle { font-size: 13px; margin-bottom: 2px; }
 .right { text-align: right; }
+.walletBalances { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; line-height: 1.5; }
+.walletBalances div { white-space: nowrap; }
 .importRow { margin-top: 10px; }
 .importRow input { flex: 1; min-width: 180px; }
 .result { background: #020617; border: 1px solid #164e63; border-radius: 12px; padding: 10px; font-size: 11px; white-space: pre-wrap; word-break: break-all; color: #a5f3fc; }

@@ -15,6 +15,7 @@ import {
 } from './crypto/vault'
 import type { EncryptedVault, OpenedVault } from './crypto/vault'
 import { clearStoredVault, loadStoredVault, saveStoredVault } from './storage'
+import { DEFAULT_CHAIN_KEY, loadDefaultChainKey, saveDefaultChainKey } from './preferences'
 import {
   clearFingerprint,
   enableFingerprint,
@@ -76,7 +77,8 @@ export default function App() {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [balances, setBalances] = useState<Record<string, string>>({})
-  const [chainKey, setChainKey] = useState<string>(BSC.key)
+  // 默认以太坊 AA；用户切换后写入 localStorage，下次打开沿用。
+  const [chainKey, setChainKey] = useState<string>(() => loadDefaultChainKey())
   const [overviews, setOverviews] = useState<Record<string, AaOverview>>({})
   const [assetSymbol, setAssetSymbol] = useState('USDC')
   const [selectedId, setSelectedId] = useState<number | null>(null)
@@ -118,6 +120,15 @@ export default function App() {
   const asset = aaChain ? (aaChain.assets.find((a) => a.symbol === assetSymbol) ?? aaChain.feeToken) : null
   const selectedOverview =
     aaChain && selected ? overviews[`${chain.key}:${selected.address}`] : undefined
+
+  const changeChain = (key: string) => {
+    const saved = saveDefaultChainKey(key)
+    setChainKey(saved)
+    const next = getChain(saved)
+    setNotice(
+      `默认链已保存：${next?.name ?? saved}${next && isAaChain(next) ? ' · AA' : ''}；下次打开直接进入`,
+    )
+  }
 
   const resetSecretState = () => {
     setPassword('')
@@ -575,7 +586,20 @@ export default function App() {
           <h1>本地钱包</h1>
           <p className="muted">
             {activeWallets.length} 个钱包 · {chain.name}
-            {aaChain ? ` · ${asset?.symbol ?? ''}` : ` · ${chain.native.symbol}`} · 已解锁
+            {aaChain ? ' · AA' : ''} · 已解锁
+            {aaChain && selectedOverview ? (
+              <>
+                <br />
+                {selectedOverview.assets.map((item) => `${item.balance} ${item.symbol}`).join(' · ')}
+                {' · '}
+                {selectedOverview.native} {chain.native.symbol}
+              </>
+            ) : !aaChain && selected ? (
+              <>
+                <br />
+                {balances[selected.address] ?? '—'} {chain.native.symbol}
+              </>
+            ) : null}
           </p>
         </div>
         <div className="row">
@@ -592,7 +616,7 @@ export default function App() {
         <select
           className="select"
           value={chainKey}
-          onChange={(e) => setChainKey(e.target.value)}
+          onChange={(e) => changeChain(e.target.value)}
           aria-label="选择链"
         >
           {CHAINS.map((c) => (
@@ -603,17 +627,24 @@ export default function App() {
           ))}
         </select>
         {aaChain
-          ? aaChain.assets.map((a) => (
-              <button
-                key={a.symbol}
-                className={a.symbol === asset?.symbol ? 'primary' : 'ghost'}
-                onClick={() => setAssetSymbol(a.symbol)}
-              >
-                {a.symbol}
-              </button>
-            ))
+          ? aaChain.assets.map((a) => {
+              const balance = selectedOverview?.assets.find((item) => item.symbol === a.symbol)?.balance
+              return (
+                <button
+                  key={a.symbol}
+                  className={a.symbol === asset?.symbol ? 'primary' : 'ghost'}
+                  onClick={() => setAssetSymbol(a.symbol)}
+                >
+                  {a.symbol}
+                  {balance !== undefined ? ` ${balance}` : ''}
+                </button>
+              )
+            })
           : null}
-        <span className="small muted">切换只影响查询/转账，不改钱包</span>
+        <button className="ghost" onClick={() => changeChain(DEFAULT_CHAIN_KEY)}>
+          默认 ETH AA
+        </button>
+        <span className="small muted">默认链保存在本机，切换只影响查询/转账，不改钱包</span>
       </div>
 
       {notice ? <div className="notice">{notice}</div> : null}
@@ -651,11 +682,23 @@ export default function App() {
                   <div className="mono small">{w.address}</div>
                 </div>
                 <div className="right">
-                  <div className="mono">
-                    {aaChain
-                      ? `${overview?.assets.find((a) => a.symbol === asset?.symbol)?.balance ?? '—'} ${asset?.symbol ?? ''}`
-                      : `${balances[w.address] ?? '—'} ${chain.native.symbol}`}
-                  </div>
+                  {aaChain ? (
+                    <div className="walletBalances mono">
+                      {aaChain.assets.map((a) => (
+                        <div key={a.symbol}>
+                          {overview?.assets.find((item) => item.symbol === a.symbol)?.balance ?? '—'}{' '}
+                          {a.symbol}
+                        </div>
+                      ))}
+                      <div>
+                        {overview?.native ?? '—'} {chain.native.symbol}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="mono">
+                      {balances[w.address] ?? '—'} {chain.native.symbol}
+                    </div>
+                  )}
                   <div className="small muted">
                     {aaChain
                       ? delegationLabel(
@@ -807,7 +850,7 @@ export default function App() {
                 )
                 .join(' · ')}
               {' · '}原生 {selectedOverview?.native ?? '—'} {aaChain.native.symbol}
-              {' · '}7702：
+              {' · '}状态：
               {delegationLabel(
                 aaChain,
                 selectedOverview?.delegation.status,

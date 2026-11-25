@@ -73,6 +73,17 @@ export interface BatchRunOptions {
 
 const UNKNOWN_AFTER_RELOAD = '页面已关闭或刷新，结果不明；请先在区块浏览器核对，不要直接重发'
 
+/** 手动输入 + 本地钱包勾选：去重但保持顺序，避免同一地址被转两次。 */
+export function mergeRecipientAddresses(manual: string[], local: string[]): string[] {
+  return Array.from(
+    new Set(
+      [...manual, ...local]
+        .map((address) => address.trim())
+        .filter(Boolean),
+    ),
+  )
+}
+
 /** 每行一个地址；空行与 # 注释忽略，非法地址带行号返回，不静默丢弃。 */
 export function parseRecipients(text: string): ParsedRecipients {
   const addresses: string[] = []

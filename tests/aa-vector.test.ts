@@ -29,4 +29,21 @@ describe('EntryPoint v0.8 UserOp vector', () => {
     const signature = await account.sign({ hash })
     expect(signature).toBe(EXPECTED_SIG)
   })
+
+  it('matches 7702 delegate initCode override', () => {
+    const hash = computeUserOpHash({
+      sender: SENDER,
+      nonce: 7n,
+      initCode: '0x',
+      callData: '0xdeadbeef',
+      accountGasLimits:
+        '0x0000000000000000000000000001b2070000000000000000000000000003640e' as Hex,
+      preVerificationGas: 120000n,
+      gasFees: '0x000000000000000000000000000f4240000000000000000000000000001e8480' as Hex,
+      paymasterAndData: '0x',
+      delegate: '0xe6Cae83BdE06E4c305530e199D7217f42808555B',
+      factoryData: '0x',
+    })
+    expect(hash).toBe('0xa347979b3869171bf6fb233b609b5af47f6aff624ecfd20486ed5247f90c93ac')
+  })
 })

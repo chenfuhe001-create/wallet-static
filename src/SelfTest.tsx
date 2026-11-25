@@ -23,9 +23,14 @@ export default function SelfTest() {
       const out: string[] = []
       const t0 = performance.now()
       try {
-        out.push('1/6 createVault (Argon2id 256MiB)…')
+        const memMiB = Number(new URLSearchParams(window.location.search).get('mem') || '64')
+        out.push(`1/6 createVault (Argon2id ${memMiB}MiB)…`)
         setLines([...out])
-        const created = await createVault({ password: PASSWORD, privateKeys: [generatePrivateKey()] })
+        const created = await createVault({
+          password: PASSWORD,
+          privateKeys: [generatePrivateKey()],
+          kdfMem: memMiB * 1024 * 1024,
+        })
         const t1 = performance.now()
         out.push(`1/6 ok ${(t1 - t0).toFixed(0)}ms, wallets=${created.wallets.length}`)
 

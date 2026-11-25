@@ -1,0 +1,50 @@
+{
+  "meta": {
+    "version": 1,
+    "next_id": 3,
+    "scheme": "wallet-vault-v1",
+    "kdf": {
+      "algo": "argon2id13",
+      "ops": 1,
+      "mem": 4194304,
+      "salt": "yxRzH/qSUirkrewiwsMFOQ=="
+    },
+    "cipher": "xchacha20poly1305-ietf",
+    "wrapNonce": "LaBjfanSBB7QhfdKR0QOLoXnTBNtgQxH",
+    "wrappedKey": "Sp8JiBXl/LIcV6zps8SbOwqYzPMvU7lg99O+pt13R/wBLhbJUL2yk42xCAotP9Kf",
+    "created_at": "2026-11-25 21:29:54",
+    "updated_at": "2026-11-25 21:29:54"
+  },
+  "wallets": [
+    {
+      "id": 1,
+      "address": "0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A",
+      "label": "fixture",
+      "status": "active",
+      "created_at": "2026-11-25 21:29:54",
+      "updated_at": "2026-11-25 21:29:54",
+      "cipher": {
+        "scheme": "xchacha20poly1305-ietf",
+        "kdf": "hkdf-sha256",
+        "salt": "zm6/e9xmEMOtQlGFTNS7Hg==",
+        "nonce": "2lt48slb7n1An0/T+Byp9jrJyLHObwTb",
+        "ciphertext": "9G5bPoL2PG0VcnNG/eYSs+Awh/9E0vlbm3Am418SdoGoXq301gJ98pEva0dSvyR5"
+      }
+    },
+    {
+      "id": 2,
+      "address": "0x1563915e194D8CfBA1943570603F7606A3115508",
+      "label": "fixture",
+      "status": "active",
+      "created_at": "2026-11-25 21:29:54",
+      "updated_at": "2026-11-25 21:29:54",
+      "cipher": {
+        "scheme": "xchacha20poly1305-ietf",
+        "kdf": "hkdf-sha256",
+        "salt": "5XNg9C2KAi3ajaBWgaRFhQ==",
+        "nonce": "6y1b35jO3mVwbwCoH9XILpnK2aVpK4ZE",
+        "ciphertext": "1uz3ZwnTG0tGWFM8kzmef3D6h2F24QwdgtxfjOlZnbvntDKR79avUgNcVeQrEFNP"
+      }
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "name": "wallet-static",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "node scripts/fix-sodium.mjs && tsc -b && vite build",
+    "preview": "vite preview",
+    "test": "node scripts/fix-sodium.mjs && vitest run",
+    "check": "node scripts/fix-sodium.mjs && tsc -b --noEmit",
+    "fix:sodium": "node scripts/fix-sodium.mjs"
+  },
+  "dependencies": {
+    "libsodium-wrappers-sumo": "^0.7.15",
+    "qrcode.react": "^4.2.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "viem": "^2.21.55"
+  },
+  "devDependencies": {
+    "@types/libsodium-wrappers-sumo": "^0.7.8",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.4.1",
+    "typescript": "~5.8.3",
+    "vite": "^6.3.5",
+    "vitest": "^3.2.4"
+  }
+}

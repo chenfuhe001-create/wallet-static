@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import type { Hex } from 'viem'
-import { BSC } from './chains'
+import { BSC, OP } from './chains'
 import {
   addWallet,
   closeVault,
@@ -14,6 +14,8 @@ import {
 import type { EncryptedVault, OpenedVault } from './crypto/vault'
 import { clearStoredVault, loadStoredVault, saveStoredVault } from './storage'
 import { estimateBnbTransfer, getBscBalance, sendBnb } from './evm/bsc'
+import { getOpOverview, sendOpUsdc } from './evm/op'
+import type { OpOverview } from './evm/op'
 
 type View = 'locked' | 'unlock' | 'create'
 
@@ -53,6 +55,8 @@ export default function App() {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [balances, setBalances] = useState<Record<string, string>>({})
+  const [chain, setChain] = useState<'bsc' | 'op'>('bsc')
+  const [opBalances, setOpBalances] = useState<Record<string, OpOverview>>({})
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [transfer, setTransfer] = useState<TransferState>(EMPTY_TRANSFER)
   const [reveal, setReveal] = useState<{ address: string; privateKey: Hex } | null>(null)
@@ -160,19 +164,38 @@ export default function App() {
   const refreshBalances = async (vault: OpenedVault | null = opened) => {
     if (!vault) return
     const active = vault.wallets.filter((w) => w.status !== 'deleted')
-    const next: Record<string, string> = {}
+    if (chain === 'bsc') {
+      const next: Record<string, string> = {}
+      await Promise.all(
+        active.map(async (w) => {
+          try {
+            const b = await getBscBalance(w.address)
+            next[w.address] = b.bnb
+          } catch {
+            next[w.address] = '读取失败'
+          }
+        }),
+      )
+      setBalances((old) => ({ ...old, ...next }))
+      return
+    }
+    const next: Record<string, OpOverview> = {}
     await Promise.all(
       active.map(async (w) => {
         try {
-          const b = await getBscBalance(w.address)
-          next[w.address] = b.bnb
+          next[w.address] = await getOpOverview(w.address)
         } catch {
-          next[w.address] = '读取失败'
+          /* 单地址失败不影响其他 */
         }
       }),
     )
-    setBalances((old) => ({ ...old, ...next }))
+    setOpBalances((old) => ({ ...old, ...next }))
   }
+
+  useEffect(() => {
+    if (opened) void refreshBalances(opened)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chain])
 
   const persist = async (vault: OpenedVault) => {
     await saveStoredVault(vault.data)
@@ -272,6 +295,43 @@ export default function App() {
         busy: false,
         error: e instanceof Error ? e.message : '发送失败',
       }))
+    }
+  }
+
+  const sendOp = async () => {
+    if (!selected) return
+    if (
+      !window.confirm(
+        `确认从 ${selected.address} 转出 ${transfer.amount} USDC（OP）到 ${transfer.to}？\n\n` +
+          '首次使用会自动做 EIP-7702 激活；gas 用 USDC 支付，手续费上限 0.05（首次 0.10）USDC。\n交易在本地签名，不可撤销。',
+      )
+    ) {
+      return
+    }
+    setTransfer((s) => ({ ...s, busy: true, error: '', result: '' }))
+    try {
+      const res = await sendOpUsdc({
+        privateKey: selected.privateKey,
+        to: transfer.to,
+        amountUsdc: transfer.amount,
+      })
+      setTransfer((s) => ({
+        ...s,
+        busy: false,
+        result: [
+          `UserOp：${res.userOpHash}`,
+          res.txHash ? `交易：${res.txHash}` : '',
+          res.feeUsdc ? `手续费：${res.feeUsdc} USDC` : '',
+          `状态：${res.status}`,
+          res.explorer,
+        ]
+          .filter(Boolean)
+          .join('\n'),
+      }))
+      setNotice('UserOp 已提交；请用区块浏览器核对')
+      void refreshBalances()
+    } catch (e) {
+      setTransfer((s) => ({ ...s, busy: false, error: e instanceof Error ? e.message : '提交失败' }))
     }
   }
 
@@ -380,7 +440,7 @@ export default function App() {
         <div>
           <h1>本地钱包</h1>
           <p className="muted">
-            {activeWallets.length} 个钱包 · BSC · 已解锁
+            {activeWallets.length} 个钱包 · {chain === 'bsc' ? 'BSC' : 'OP'} · 已解锁
           </p>
         </div>
         <div className="row">
@@ -392,6 +452,16 @@ export default function App() {
           </button>
         </div>
       </header>
+
+      <div className="row chainTabs">
+        <button className={chain === 'bsc' ? 'primary' : 'ghost'} onClick={() => setChain('bsc')}>
+          BSC · BNB
+        </button>
+        <button className={chain === 'op' ? 'primary' : 'ghost'} onClick={() => setChain('op')}>
+          OP · USDC（AA）
+        </button>
+        <span className="small muted">切换只影响查询/转账，不改钱包</span>
+      </div>
 
       {notice ? <div className="notice">{notice}</div> : null}
       {error ? <div className="error">{error}</div> : null}
@@ -426,8 +496,18 @@ export default function App() {
                 <div className="mono small">{w.address}</div>
               </div>
               <div className="right">
-                <div className="mono">{balances[w.address] ?? '—'} BNB</div>
-                <div className="small muted">{short(w.address)}</div>
+                <div className="mono">
+                  {chain === 'bsc'
+                    ? `${balances[w.address] ?? '—'} BNB`
+                    : `${opBalances[w.address]?.usdc ?? '—'} USDC`}
+                </div>
+                <div className="small muted">
+                  {chain === 'op'
+                    ? opBalances[w.address]?.delegation.status === 'delegated'
+                      ? '7702 已激活'
+                      : opBalances[w.address]?.delegation.status ?? short(w.address)
+                    : short(w.address)}
+                </div>
               </div>
             </button>
           ))}
@@ -448,6 +528,7 @@ export default function App() {
 
       {selected ? (
         <>
+          {chain === 'bsc' ? (
           <section className="card">
             <div className="row space">
               <h2>转账 · BSC（BNB）</h2>
@@ -487,6 +568,43 @@ export default function App() {
               私钥只在点击按钮后用于本地签名；广播请求只包含已签名交易，不含私钥。
             </p>
           </section>
+          ) : (
+          <section className="card">
+            <div className="row space">
+              <h2>转账 · OP（USDC，gas 用 USDC）</h2>
+              <span className="small muted">#{selected.id} {short(selected.address)}</span>
+            </div>
+            <p className="small muted">
+              USDC 余额：{opBalances[selected.address]?.usdc ?? '—'} · 7702：
+              {opBalances[selected.address]?.delegation.status === 'delegated'
+                ? '已激活'
+                : opBalances[selected.address]?.delegation.status ?? '未知'}
+            </p>
+            <input
+              value={transfer.to}
+              onChange={(e) => setTransfer((s) => ({ ...s, to: e.target.value }))}
+              placeholder="收款地址 0x…"
+              spellCheck={false}
+            />
+            <input
+              value={transfer.amount}
+              onChange={(e) => setTransfer((s) => ({ ...s, amount: e.target.value }))}
+              placeholder="金额（USDC）"
+              inputMode="decimal"
+            />
+            <div className="row">
+              <button className="primary" onClick={() => void sendOp()} disabled={transfer.busy}>
+                {transfer.busy ? '签名/提交中…' : '本地签名并提交 UserOp'}
+              </button>
+            </div>
+            {transfer.result ? <pre className="result">{transfer.result}</pre> : null}
+            {transfer.error ? <div className="error">{transfer.error}</div> : null}
+            <p className="small muted">
+              首次自动 7702 激活；permit/UserOp/授权全部本地签名，bundler 只收到已签名 UserOp。
+              建议先用 0.01 USDC 验证。
+            </p>
+          </section>
+          )}
 
           <section className="card">
             <div className="row space">

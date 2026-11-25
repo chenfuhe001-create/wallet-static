@@ -4,7 +4,7 @@
 
 - 前端：Vite + React + TypeScript
 - 加密：libsodium（Argon2id + XChaCha20-Poly1305 + HKDF-SHA256），格式与 web 项目 `wallet_core.py` 兼容
-- 链交互：viem + 浏览器直连公共 RPC（当前 BSC 原生 BNB；OP/AA 在下一阶段）
+- 链交互：viem + 浏览器直连公共 RPC（BSC 原生 BNB；OP Circle v0.8 AA / 7702 / USDC gas）
 - 托管：GitHub Pages（`docs/`），与 API 服务器分离
 
 ## 安全模型
@@ -44,5 +44,5 @@ npm run build
 - [x] 本地生成/导入/加密备份
 - [x] BSC BNB 本地签名 + 直连 RPC 广播
 - [x] 私钥本地二维码
-- [ ] OP / Circle v0.8 AA（UserOp、permit、7702、paymaster）
+- [x] OP / Circle v0.8 AA（USDC permit、7702 授权、paymasterData、Pimlico 直连）
 - [ ] 本地地址本 / 批量转账

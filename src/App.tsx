@@ -34,6 +34,17 @@ function short(addr: string): string {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`
 }
 
+function delegationLabel(status?: string, implementation?: string): string {
+  if (status === 'delegated') {
+    return implementation && implementation.toLowerCase() !== OP.implementation.toLowerCase()
+      ? '7702 其他实现'
+      : '7702 已激活'
+  }
+  if (status === 'none') return '7702 未激活'
+  if (status === 'contract') return '合约地址'
+  return '7702 未知'
+}
+
 function downloadText(name: string, text: string): void {
   const blob = new Blob([text], { type: 'application/json' })
   const url = URL.createObjectURL(blob)
@@ -503,9 +514,10 @@ export default function App() {
                 </div>
                 <div className="small muted">
                   {chain === 'op'
-                    ? opBalances[w.address]?.delegation.status === 'delegated'
-                      ? '7702 已激活'
-                      : opBalances[w.address]?.delegation.status ?? short(w.address)
+                    ? delegationLabel(
+                        opBalances[w.address]?.delegation.status,
+                        opBalances[w.address]?.delegation.implementation,
+                      )
                     : short(w.address)}
                 </div>
               </div>
@@ -576,9 +588,10 @@ export default function App() {
             </div>
             <p className="small muted">
               USDC 余额：{opBalances[selected.address]?.usdc ?? '—'} · 7702：
-              {opBalances[selected.address]?.delegation.status === 'delegated'
-                ? '已激活'
-                : opBalances[selected.address]?.delegation.status ?? '未知'}
+              {delegationLabel(
+                opBalances[selected.address]?.delegation.status,
+                opBalances[selected.address]?.delegation.implementation,
+              )}
             </p>
             <input
               value={transfer.to}

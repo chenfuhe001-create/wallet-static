@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import type { Hex } from 'viem'
-import { BSC, CHAINS, feeCapFor, getAaChain } from './chains'
+import { BSC, CHAINS, feeCapFor, getChain, isAaChain } from './chains'
 import type { AaChainConfig } from './chains'
 import {
   addWallet,
@@ -15,7 +15,14 @@ import {
 } from './crypto/vault'
 import type { EncryptedVault, OpenedVault } from './crypto/vault'
 import { clearStoredVault, loadStoredVault, saveStoredVault } from './storage'
-import { estimateBnbTransfer, getBscBalance, sendBnb } from './evm/bsc'
+import {
+  clearFingerprint,
+  enableFingerprint,
+  hasFingerprint,
+  isWebAuthnSupported,
+  unlockWithFingerprint,
+} from './crypto/fingerprint'
+import { estimateNativeTransfer, getNativeBalance, sendNative } from './evm/native'
 import BatchPanel from './BatchPanel'
 import { getAaOverview, sendAaTransfer } from './evm/op'
 import type { AaOverview } from './evm/op'
@@ -69,7 +76,7 @@ export default function App() {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [balances, setBalances] = useState<Record<string, string>>({})
-  const [chainId, setChainId] = useState<number>(BSC.id)
+  const [chainKey, setChainKey] = useState<string>(BSC.key)
   const [overviews, setOverviews] = useState<Record<string, AaOverview>>({})
   const [assetSymbol, setAssetSymbol] = useState('USDC')
   const [selectedId, setSelectedId] = useState<number | null>(null)
@@ -78,10 +85,14 @@ export default function App() {
   const [importKey, setImportKey] = useState('')
   const [newPassword, setNewPassword] = useState('')
   const [newPassword2, setNewPassword2] = useState('')
+  const [fingerprintReady, setFingerprintReady] = useState(false)
+  const [fingerprintPassword, setFingerprintPassword] = useState('')
+  const [webAuthnSupported] = useState(() => isWebAuthnSupported())
   const revealTimer = useRef<number | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
+    setFingerprintReady(hasFingerprint())
     void (async () => {
       try {
         const data = await loadStoredVault()
@@ -101,12 +112,12 @@ export default function App() {
     [opened],
   )
   const selected = activeWallets.find((w) => w.id === selectedId) || activeWallets[0] || null
-  // AA 链只从注册表取；chainId 由本页 select 产生，不会出现未知链。
-  const aaChain: AaChainConfig | null = chainId === BSC.id ? null : getAaChain(chainId)
-  const chain = aaChain ?? BSC
+  // 链只从注册表按 key 取；普通转账链（BSC / Ethereum）与 AA 链分开。
+  const chain = getChain(chainKey) ?? BSC
+  const aaChain: AaChainConfig | null = isAaChain(chain) ? chain : null
   const asset = aaChain ? (aaChain.assets.find((a) => a.symbol === assetSymbol) ?? aaChain.feeToken) : null
   const selectedOverview =
-    aaChain && selected ? overviews[`${aaChain.id}:${selected.address}`] : undefined
+    aaChain && selected ? overviews[`${chain.key}:${selected.address}`] : undefined
 
   const resetSecretState = () => {
     setPassword('')
@@ -142,6 +153,55 @@ export default function App() {
     }
   }
 
+  const unlockWithPrint = async () => {
+    if (!stored) return
+    setBusy('正在验证指纹…')
+    setError('')
+    try {
+      const pass = await unlockWithFingerprint()
+      const next = await unlockVault(stored, pass)
+      setOpened(next)
+      setPassword('')
+      setView('locked')
+      setNotice('已用指纹解锁；密码与私钥只在当前页面内存中')
+      void refreshBalances(next)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '指纹解锁失败')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const enablePrint = async () => {
+    if (!stored) return
+    if (!fingerprintPassword) {
+      setError('请输入当前钱包密码')
+      return
+    }
+    setBusy('正在校验密码并创建指纹凭据…')
+    setError('')
+    let check: OpenedVault | null = null
+    try {
+      // 先校验密码，避免把输错的密码包装进指纹凭据。
+      check = await unlockVault(stored, fingerprintPassword)
+      await enableFingerprint(fingerprintPassword)
+      setFingerprintPassword('')
+      setFingerprintReady(true)
+      setNotice('指纹解锁已启用；改密后需重新启用')
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '启用指纹失败')
+    } finally {
+      if (check) closeVault(check)
+      setBusy('')
+    }
+  }
+
+  const disablePrint = () => {
+    clearFingerprint()
+    setFingerprintReady(false)
+    setNotice('已停用指纹解锁；密码解锁仍可用')
+  }
+
   const create = async () => {
     if (password !== password2) {
       setError('两次输入的密码不一致')
@@ -156,6 +216,8 @@ export default function App() {
         label: label.trim(),
       })
       await saveStoredVault(next.data)
+      clearFingerprint()
+      setFingerprintReady(false)
       setStored(next.data)
       setOpened(next)
       setPassword('')
@@ -176,6 +238,8 @@ export default function App() {
       const text = await file.text()
       const data = parseVaultJson(text)
       await saveStoredVault(data)
+      clearFingerprint()
+      setFingerprintReady(false)
       setStored(data)
       setView('unlock')
       setNotice('保险箱已导入本地；输入原密码解锁')
@@ -192,8 +256,8 @@ export default function App() {
       await Promise.all(
         active.map(async (w) => {
           try {
-            const b = await getBscBalance(w.address)
-            next[w.address] = b.bnb
+            const b = await getNativeBalance(chain, w.address)
+            next[w.address] = b.amount
           } catch {
             next[w.address] = '读取失败'
           }
@@ -206,7 +270,7 @@ export default function App() {
     await Promise.all(
       active.map(async (w) => {
         try {
-          next[`${aaChain.id}:${w.address}`] = await getAaOverview(aaChain, w.address)
+          next[`${chain.key}:${w.address}`] = await getAaOverview(aaChain, w.address)
         } catch {
           /* 单地址失败不影响其他 */
         }
@@ -221,7 +285,7 @@ export default function App() {
     if (aaChain && !aaChain.assets.some((item) => item.symbol === assetSymbol)) setAssetSymbol('USDC')
     if (opened) void refreshBalances(opened)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chainId])
+  }, [chainKey])
 
   const persist = async (vault: OpenedVault) => {
     await saveStoredVault(vault.data)
@@ -280,11 +344,13 @@ export default function App() {
     try {
       const next = await changePassword(opened, newPassword)
       await saveStoredVault(next.data)
+      clearFingerprint()
+      setFingerprintReady(false)
       setStored(next.data)
       setOpened(next)
       setNewPassword('')
       setNewPassword2('')
-      setNotice('已用新密码重新加密；旧密码立即失效，请重新导出备份')
+      setNotice('已用新密码重新加密；旧密码与指纹解锁立即失效，请重新启用指纹并导出备份')
     } catch (e) {
       setError(e instanceof Error ? e.message : '修改密码失败')
     } finally {
@@ -302,16 +368,16 @@ export default function App() {
     if (!selected) return
     setTransfer((s) => ({ ...s, busy: true, error: '', result: '' }))
     try {
-      const est = await estimateBnbTransfer({
+      const est = await estimateNativeTransfer(chain, {
         from: selected.address,
         to: transfer.to,
-        amountBnb: transfer.amount,
+        amount: transfer.amount,
         gasPriceGwei: transfer.gasPrice,
       })
       setTransfer((s) => ({
         ...s,
         busy: false,
-        result: `预估 gas ${est.gasLimit} × ${est.gasPrice} wei ≈ ${est.feeBnb} BNB`,
+        result: `预估 gas ${est.gasLimit} × ${est.gasPrice} wei ≈ ${est.fee} ${chain.native.symbol}`,
       }))
     } catch (e) {
       setTransfer((s) => ({ ...s, busy: false, error: e instanceof Error ? e.message : '预估失败' }))
@@ -320,21 +386,26 @@ export default function App() {
 
   const send = async () => {
     if (!selected) return
-    if (!window.confirm(`确认从 ${selected.address} 转出 ${transfer.amount} BNB 到 ${transfer.to}？\n\n交易将在本地签名后直接广播，不可撤销。`)) {
+    if (
+      !window.confirm(
+        `确认从 ${selected.address} 在 ${chain.name} 转出 ${transfer.amount} ${chain.native.symbol} 到 ${transfer.to}？\n\n` +
+          '交易将在本地签名后直接广播，不可撤销。',
+      )
+    ) {
       return
     }
     setTransfer((s) => ({ ...s, busy: true, error: '', result: '' }))
     try {
-      const res = await sendBnb({
+      const res = await sendNative(chain, {
         privateKey: selected.privateKey,
         to: transfer.to,
-        amountBnb: transfer.amount,
+        amount: transfer.amount,
         gasPriceGwei: transfer.gasPrice,
       })
       setTransfer((s) => ({
         ...s,
         busy: false,
-        result: `已广播：${res.hash}\n手续费：${res.feeBnb} BNB`,
+        result: `已广播：${res.hash}\n手续费：${res.fee} ${chain.native.symbol}`,
       }))
       setNotice('交易已广播；请用区块浏览器核对')
       void refreshBalances()
@@ -417,6 +488,14 @@ export default function App() {
               <button className="primary" onClick={() => void unlock()} disabled={Boolean(busy)}>
                 {busy || '解锁'}
               </button>
+              {fingerprintReady && webAuthnSupported ? (
+                <button className="ghost" onClick={() => void unlockWithPrint()} disabled={Boolean(busy)}>
+                  用指纹解锁
+                </button>
+              ) : null}
+              {fingerprintReady && !webAuthnSupported ? (
+                <p className="small muted">本机有指纹凭据，但当前环境不是安全上下文，请用密码解锁。</p>
+              ) : null}
               <div className="row">
                 <button className="ghost" onClick={() => fileRef.current?.click()} disabled={Boolean(busy)}>
                   导入另一个保险箱文件
@@ -426,6 +505,8 @@ export default function App() {
                   onClick={() => {
                     if (!window.confirm('清除本浏览器保存的密文？已导出的备份不会被删除。')) return
                     void clearStoredVault().then(() => {
+                      clearFingerprint()
+                      setFingerprintReady(false)
                       setStored(null)
                       setView('create')
                     })
@@ -492,8 +573,8 @@ export default function App() {
         <div>
           <h1>本地钱包</h1>
           <p className="muted">
-            {activeWallets.length} 个钱包 · {chain.short}
-            {aaChain ? ` · ${asset?.symbol ?? ''}` : ''} · 已解锁
+            {activeWallets.length} 个钱包 · {chain.name}
+            {aaChain ? ` · ${asset?.symbol ?? ''}` : ` · ${chain.native.symbol}`} · 已解锁
           </p>
         </div>
         <div className="row">
@@ -509,14 +590,14 @@ export default function App() {
       <div className="row chainTabs">
         <select
           className="select"
-          value={chainId}
-          onChange={(e) => setChainId(Number(e.target.value))}
+          value={chainKey}
+          onChange={(e) => setChainKey(e.target.value)}
           aria-label="选择链"
         >
           {CHAINS.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.short} · {c.native.symbol}
-              {'aa' in c ? ' · AA' : ''}
+            <option key={c.key} value={c.key}>
+              {c.name}
+              {isAaChain(c) ? ' · AA' : ' · 普通转账'}
             </option>
           ))}
         </select>
@@ -555,7 +636,7 @@ export default function App() {
 
         <div className="list">
           {activeWallets.map((w) => {
-            const overview = aaChain ? overviews[`${aaChain.id}:${w.address}`] : undefined
+            const overview = aaChain ? overviews[`${chain.key}:${w.address}`] : undefined
             return (
               <button
                 key={w.id}
@@ -572,7 +653,7 @@ export default function App() {
                   <div className="mono">
                     {aaChain
                       ? `${overview?.assets.find((a) => a.symbol === asset?.symbol)?.balance ?? '—'} ${asset?.symbol ?? ''}`
-                      : `${balances[w.address] ?? '—'} BNB`}
+                      : `${balances[w.address] ?? '—'} ${chain.native.symbol}`}
                   </div>
                   <div className="small muted">
                     {aaChain
@@ -624,10 +705,44 @@ export default function App() {
           </div>
           <p className="small muted">迁移后建议改一次密码，旧服务器用过的密码立即失效。</p>
         </details>
+
+        <details className="importRow">
+          <summary className="small muted">指纹解锁（WebAuthn PRF）</summary>
+          {!webAuthnSupported ? (
+            <p className="small muted">当前环境不支持 WebAuthn/指纹（需要 HTTPS 或 localhost）。</p>
+          ) : fingerprintReady ? (
+            <>
+              <p className="small muted">
+                已启用：只包装钱包密码，不碰私钥。改密、重新导入或清除本机数据后必须重新启用。
+              </p>
+              <button className="ghost" onClick={disablePrint} disabled={Boolean(busy)}>
+                停用指纹解锁
+              </button>
+            </>
+          ) : (
+            <>
+              <p className="small muted">
+                启用后可用设备指纹/面容解锁；密码仍可手输。原始 PRF 与明文密码不落盘。
+              </p>
+              <div className="row">
+                <input
+                  type="password"
+                  value={fingerprintPassword}
+                  onChange={(e) => setFingerprintPassword(e.target.value)}
+                  placeholder="当前钱包密码（启用指纹用）"
+                  autoComplete="current-password"
+                />
+                <button className="ghost" onClick={() => void enablePrint()} disabled={Boolean(busy)}>
+                  启用指纹
+                </button>
+              </div>
+            </>
+          )}
+        </details>
       </section>
 
       <BatchPanel
-        key={chain.id}
+        key={chain.key}
         wallets={activeWallets}
         chain={chain}
         aaChain={aaChain}
@@ -640,7 +755,7 @@ export default function App() {
           {!aaChain ? (
           <section className="card">
             <div className="row space">
-              <h2>转账 · BSC（BNB）</h2>
+              <h2>转账 · {chain.name}（{chain.native.symbol}）</h2>
               <span className="small muted">#{selected.id} {short(selected.address)}</span>
             </div>
             <input
@@ -653,7 +768,7 @@ export default function App() {
               <input
                 value={transfer.amount}
                 onChange={(e) => setTransfer((s) => ({ ...s, amount: e.target.value }))}
-                placeholder="金额（BNB）"
+                placeholder={`金额（${chain.native.symbol}）`}
                 inputMode="decimal"
               />
               <input

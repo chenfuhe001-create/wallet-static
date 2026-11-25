@@ -39,6 +39,24 @@ export const BSC: ChainConfig = {
   ],
 }
 
+/**
+ * Ethereum 普通转账（legacy）：与 BSC 同路径，只转原生 ETH。
+ * 与下面的 Circle AA 以太坊入口共用 chainId=1，但 key 不同，选择/缓存按 key 区分。
+ */
+export const ETHEREUM_NATIVE: ChainConfig = {
+  key: 'ethereum-native',
+  id: 1,
+  name: 'Ethereum',
+  short: 'ETH',
+  native: { symbol: 'ETH', name: 'Ether', decimals: 18 },
+  rpc: [
+    { url: 'https://ethereum-rpc.publicnode.com', label: 'PublicNode' },
+    { url: 'https://eth.drpc.org', label: 'dRPC' },
+    { url: 'https://cloudflare-eth.com', label: 'Cloudflare' },
+  ],
+  explorerTx: 'https://etherscan.io/tx/',
+}
+
 export interface AaChainConfig extends ChainConfig {
   aa: true
   paymaster: `0x${string}`
@@ -146,7 +164,7 @@ export const ARBITRUM: AaChainConfig = {
 export const ETHEREUM: AaChainConfig = {
   key: 'ethereum',
   id: 1,
-  name: 'Ethereum',
+  name: 'Ethereum（USDC AA）',
   short: 'ETH',
   native: { symbol: 'ETH', name: 'Ether', decimals: 18 },
   rpc: [
@@ -254,17 +272,21 @@ export const AA_CHAINS: AaChainConfig[] = [
   UNICHAIN,
 ]
 
-export const CHAINS: ChainConfig[] = [BSC, ...AA_CHAINS]
+export const CHAINS: ChainConfig[] = [BSC, ETHEREUM_NATIVE, ...AA_CHAINS]
 
-export function getChain(id: number): ChainConfig | undefined {
-  return CHAINS.find((chain) => chain.id === id)
+export function isAaChain(chain: ChainConfig): chain is AaChainConfig {
+  return 'aa' in chain && chain.aa === true
 }
 
-/** AA 路径只认注册表里的链；BSC 走 legacy，不能混用。 */
-export function getAaChain(id: number): AaChainConfig {
-  if (id === BSC.id) throw new Error('BSC 是 legacy 链，不能走 Circle AA 路径')
-  const chain = AA_CHAINS.find((item) => item.id === id)
-  if (!chain) throw new Error(`不支持的链：${id}`)
+export function getChain(key: string): ChainConfig | undefined {
+  return CHAINS.find((chain) => chain.key === key)
+}
+
+/** AA 路径只认注册表里的 AA 链；BSC / 以太坊普通转账不能混用。 */
+export function getAaChain(key: string): AaChainConfig {
+  const chain = CHAINS.find((item) => item.key === key)
+  if (!chain) throw new Error(`不支持的链：${key}`)
+  if (!isAaChain(chain)) throw new Error(`${chain.short} 是普通转账链，不能走 Circle AA 路径`)
   return chain
 }
 

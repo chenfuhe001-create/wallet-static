@@ -100,7 +100,7 @@ describe('EntryPoint v0.8 UserOp vector', () => {
   })
 
   it('把链的 chainId 与 EntryPoint 编进域分隔符', () => {
-    const base = getAaChain(8453)
+    const base = getAaChain('base')
     expect(computeUserOpHash(CROSS_CHAIN_INPUT, base)).toBe(oracleHash(base.id, base.entrypoint))
     expect(computeUserOpHash(CROSS_CHAIN_INPUT, OP)).toBe(oracleHash(OP.id, OP.entrypoint))
     expect(computeUserOpHash(CROSS_CHAIN_INPUT, base)).not.toBe(

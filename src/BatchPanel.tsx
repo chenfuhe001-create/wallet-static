@@ -18,7 +18,7 @@ import type {
   BatchPlanItem,
   BatchSenderAdapter,
 } from './evm/batch'
-import { estimateBnbTransfer, getBscBalance, sendBnb } from './evm/bsc'
+import { estimateNativeTransfer, getNativeBalance, sendNative } from './evm/native'
 import { getAaOverview, sendAaTransfer } from './evm/op'
 import { BroadcastError } from './rpc'
 
@@ -60,22 +60,26 @@ function makeAdapters(
         address: wallet.address,
         minIntervalMs: 800,
         async precheck(amount, to) {
-          const balance = await getBscBalance(wallet.address)
-          const value = parseUnits(amount, 18)
-          if (balance.wei < value) return 'BNB 余额不足以支付金额'
-          const estimate = await estimateBnbTransfer({ from: wallet.address, to, amountBnb: amount })
-          if (balance.wei < value + parseUnits(estimate.feeBnb, 18)) {
-            return 'BNB 余额不足以支付手续费'
+          const balance = await getNativeBalance(chain, wallet.address)
+          const value = parseUnits(amount, chain.native.decimals)
+          if (balance.wei < value) return `${chain.native.symbol} 余额不足以支付金额`
+          const estimate = await estimateNativeTransfer(chain, {
+            from: wallet.address,
+            to,
+            amount,
+          })
+          if (balance.wei < value + parseUnits(estimate.fee, chain.native.decimals)) {
+            return `${chain.native.symbol} 余额不足以支付手续费`
           }
           return null
         },
         async send(to, amount) {
           try {
-            const res = await sendBnb({ privateKey: wallet.privateKey, to, amountBnb: amount })
+            const res = await sendNative(chain, { privateKey: wallet.privateKey, to, amount })
             return {
               status: res.status,
               hash: res.hash,
-              fee: `${res.feeBnb} BNB`,
+              fee: `${res.fee} ${chain.native.symbol}`,
               explorer: explorer ? `${explorer}${res.hash}` : undefined,
             }
           } catch (err) {

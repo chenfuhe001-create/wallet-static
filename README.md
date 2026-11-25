@@ -49,16 +49,18 @@ npm run build
 - [x] 本地改密 / 重新加密备份
 - [x] 真实链上 canary（用户确认 BSC/OP 小额转账成功）
 - [x] 多链扩展（Base/Arbitrum/Ethereum/Polygon/Avalanche/Unichain）：注册表 + 7 链只读核验
+- [x] 以太坊普通转账（原生 ETH legacy；与 USDC AA 入口并存，按 key 选择）
 - [x] 多资产转账（USDC / USDT0 / USDT；gas 固定 USDC）
 - [ ] 新链真实 canary（Base/Arbitrum/Polygon 各 0.01 USDC，待用户批准）
 - [x] 批量转账（一个→多个地址、多个→一个地址；逐笔签名、非原子、结果恢复）
 - [ ] 批量真实 canary（BSC 0.001 BNB ×3 / OP 0.01 USDC ×2，待用户批准）
-- [ ] 本地指纹（WebAuthn PRF）
+- [x] 本地指纹（WebAuthn PRF）：PRF → HKDF → AES-GCM 包装密码，改密/导入/清除后失效
 - [ ] 本地地址本（未列入本期）
 
 ## 开发约定与技能
 
-- 待开发需求（多链 / 批量 / 指纹）见 `开发简报_多链批量指纹.md`；**开发完成并验收后删除该文件**，长期信息留在 `Ai记忆库` 与 `ADR_002`。
+- 多链 / 批量 / 指纹均已实现；剩余真实链 canary 见上方状态。长期结论在 `Ai记忆库`、`ADR_002`、`ADR_003`。
+- 链选择按 `ChainConfig.key`（不是 chainId）：以太坊同时有 `ethereum-native`（普通 ETH）与 `ethereum`（USDC AA）两个入口。
 - `.openhands/skills/` 已从 web 项目迁移通用技能：`memory`、`skill-guide`、`writing-great-skills`、`grill-me`、`to-spec`、`to-tickets`、`tdd`、`code-review`。
 - 任务前按 `memory` 技能检索 `Ai记忆库/索引.json`；非微小改动后落盘记忆并推送。
 - 测试/临时脚本必须清理，不留在仓库；`docs/` 是 Pages 产物，`dist/`、`node_modules/`、`*.tsbuildinfo` 不入库。

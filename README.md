@@ -47,10 +47,14 @@ npm run build
 - [x] OP / Circle v0.8 AA（USDC permit、7702 授权、paymasterData、Pimlico 直连）
 - [x] 本地改密 / 重新加密备份
 - [x] 真实链上 canary（用户确认 BSC/OP 小额转账成功）
-- [ ] 本地地址本 / 批量转账
+- [ ] 多链扩展（Base/Arbitrum/Ethereum/Polygon/Avalanche/Unichain）
+- [ ] 批量转账（一个→多个地址、多个→一个地址）
+- [ ] 本地指纹（WebAuthn PRF）
+- [ ] 本地地址本（未列入本期）
 
 ## 开发约定与技能
 
+- 待开发需求（多链 / 批量 / 指纹）见 `开发简报_多链批量指纹.md`；**开发完成并验收后删除该文件**，长期信息留在 `Ai记忆库` 与 `ADR_002`。
 - `.openhands/skills/` 已从 web 项目迁移通用技能：`memory`、`skill-guide`、`writing-great-skills`、`grill-me`、`to-spec`、`to-tickets`、`tdd`、`code-review`。
 - 任务前按 `memory` 技能检索 `Ai记忆库/索引.json`；非微小改动后落盘记忆并推送。
 - 测试/临时脚本必须清理，不留在仓库；`docs/` 是 Pages 产物，`dist/`、`node_modules/`、`*.tsbuildinfo` 不入库。

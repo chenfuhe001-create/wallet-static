@@ -45,4 +45,5 @@ npm run build
 - [x] BSC BNB 本地签名 + 直连 RPC 广播
 - [x] 私钥本地二维码
 - [x] OP / Circle v0.8 AA（USDC permit、7702 授权、paymasterData、Pimlico 直连）
+- [x] 本地改密 / 重新加密备份
 - [ ] 本地地址本 / 批量转账

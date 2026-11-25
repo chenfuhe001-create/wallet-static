@@ -163,7 +163,7 @@ export async function getOpOverview(address: string): Promise<OpOverview> {
   }
 }
 
-async function getBundlerGasPrice(): Promise<{ maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }> {
+export async function getBundlerGasPrice(): Promise<{ maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }> {
   try {
     const result = await rpcCall<{
       standard?: { maxFeePerGas: Hex; maxPriorityFeePerGas: Hex }
@@ -190,7 +190,7 @@ interface PaymasterState {
   additionalGasCharge: bigint
 }
 
-async function getPaymasterState(): Promise<PaymasterState> {
+export async function getPaymasterState(): Promise<PaymasterState> {
   const [price, spread, additional] = await Promise.all([
     readUint(OP.paymaster, FETCH_PRICE_SELECTOR),
     readUint(OP.paymaster, FEE_SPREAD_SELECTOR),
@@ -394,16 +394,21 @@ async function waitForUserOpReceipt(hash: Hex, timeoutMs = 120_000): Promise<OpT
         success?: boolean
         actualGasCost?: Hex
         logs?: Array<{ address?: string; topics?: string[]; data?: Hex }>
-        receipt?: { transactionHash?: Hex; status?: Hex }
+        receipt?: {
+          transactionHash?: Hex
+          status?: Hex
+          logs?: Array<{ address?: string; topics?: string[]; data?: Hex }>
+        }
       } | null>(BUNDLER_ENDPOINT, 'eth_getUserOperationReceipt', [hash], 30_000)
       if (receipt) {
         const txHash = receipt.receipt?.transactionHash
         let feeUsdc: string | undefined
         // Circle 实际手续费只看 UserOperationSponsored 的 feeTokenAmount；
         // actualGasCost 是 native wei，不能当 USDC。
-        for (const log of receipt.logs || []) {
+        for (const log of receipt.logs || receipt.receipt?.logs || []) {
           if (String(log.address || '').toLowerCase() !== OP.paymaster.toLowerCase()) continue
           if (!log.topics?.length || log.topics[0].toLowerCase() !== USEROP_SPONSORED_TOPIC.toLowerCase()) continue
+          if (log.topics.length < 3 || !log.topics[1].toLowerCase().endsWith(OP.usdc.slice(2).toLowerCase())) continue
           try {
             const words = decodeAbiParameters(
               [{ type: 'bytes32' }, { type: 'uint256' }, { type: 'uint256' }, { type: 'uint256' }],
@@ -415,10 +420,12 @@ async function waitForUserOpReceipt(hash: Hex, timeoutMs = 120_000): Promise<OpT
             /* 非标准日志忽略 */
           }
         }
+        const innerStatus = receipt.receipt?.status
+        const success = innerStatus !== undefined ? innerStatus === '0x1' : receipt.success !== false
         return {
           userOpHash: hash,
           txHash,
-          status: receipt.success === false ? 'failed' : 'success',
+          status: success ? 'success' : 'failed',
           feeUsdc,
           explorer: txHash ? `${OP.explorerTx}${txHash}` : OP.explorerTx,
         }

@@ -28,11 +28,12 @@ import {
   AmbiguousBroadcastError,
   PreBroadcastError,
   isTransientNetworkError,
-  rpcCall,
   rpcRead,
   sleep,
-  type RpcEndpoint,
 } from '../rpc'
+import { PacerBusyError } from './limiter'
+import { bundlerCall } from './bundler'
+import { classifyBundlerSendError } from './sendError'
 
 const USEROP_TYPEHASH = keccak256(
   stringToHex(
@@ -62,52 +63,6 @@ const USEROP_SPONSORED_TOPIC = keccak256(
 const STUB_SIGNATURE: Hex =
   '0xfffffffffffffffffffffffffffffff0000000000000000000000000000000007aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1c'
 const MAX_UINT256 = (1n << 256n) - 1n
-
-function bundlerEndpoint(chain: AaChainConfig): RpcEndpoint {
-  return { url: chain.bundler, label: 'Pimlico' }
-}
-
-// 公共 Pimlico 约 12 次/分钟就会触发 WAF，随后约 30 秒内全是 Failed to fetch。
-// 所有 bundler 请求走同一队列，6 秒一次；9 笔批量约 4 分钟，宁可慢也不能断。
-const BUNDLER_MIN_INTERVAL_MS = 6_000
-let bundlerQueue: Promise<unknown> = Promise.resolve()
-let lastBundlerCallAt = 0
-
-async function bundlerCall<T>(
-  chain: AaChainConfig,
-  method: string,
-  params: unknown[] = [],
-  timeoutMs = 30_000,
-): Promise<T> {
-  const run = async () => {
-    const wait = Math.max(0, BUNDLER_MIN_INTERVAL_MS - (Date.now() - lastBundlerCallAt))
-    if (wait > 0) await sleep(wait)
-    lastBundlerCallAt = Date.now()
-    return rpcCall<T>(bundlerEndpoint(chain), method, params, timeoutMs)
-  }
-  const result = bundlerQueue.then(run, run)
-  bundlerQueue = result.then(
-    () => undefined,
-    () => undefined,
-  )
-  return result
-}
-
-async function withTransientRetry<T>(fn: () => Promise<T>, attempts = 4): Promise<T> {
-  // 公共 Pimlico 的 WAF 通常封 30 秒；退避总时长要覆盖一次冷却。
-  const delays = [5_000, 12_000, 25_000]
-  let last: unknown
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    try {
-      return await fn()
-    } catch (err) {
-      last = err
-      if (!isTransientNetworkError(err) || attempt === attempts - 1) throw err
-      await sleep(delays[Math.min(attempt, delays.length - 1)])
-    }
-  }
-  throw last
-}
 
 export interface AaDelegation {
   status: 'none' | 'delegated' | 'contract' | 'unknown'
@@ -244,40 +199,65 @@ const gasPriceCache = new Map<
   number,
   { at: number; value: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint } }
 >()
-const GAS_PRICE_TTL_MS = 15_000
+// 2 分钟：批量里 9 个钱包共用一次 gasPrice，避免每笔都打 bundler；
+// 同时用 15% 缓冲覆盖 baseFee 在批量执行期间的小幅上涨。
+const GAS_PRICE_TTL_MS = 120_000
+const GAS_PRICE_BUFFER_BPS = 1_150n
+
+const gasPriceInFlight = new Map<
+  number,
+  Promise<{ maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }>
+>()
+
+async function loadGasPrice(
+  chain: AaChainConfig,
+): Promise<{ maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }> {
+  try {
+    const result = await bundlerCall<{
+      standard?: { maxFeePerGas: Hex; maxPriorityFeePerGas: Hex }
+      fast?: { maxFeePerGas: Hex; maxPriorityFeePerGas: Hex }
+      slow?: { maxFeePerGas: Hex; maxPriorityFeePerGas: Hex }
+    }>(chain, 'pimlico_getUserOperationGasPrice', [], 30_000, 20_000)
+    const bucket = result.standard || result.fast || result.slow
+    if (bucket) {
+      const rawMaxFee = hexToBigInt(bucket.maxFeePerGas)
+      const maxPriorityFeePerGas = hexToBigInt(bucket.maxPriorityFeePerGas)
+      if (rawMaxFee > 0n) {
+        return {
+          maxFeePerGas: (rawMaxFee * GAS_PRICE_BUFFER_BPS) / 1_000n,
+          maxPriorityFeePerGas,
+        }
+      }
+    }
+  } catch {
+    /* bundler 限流时退回公共 RPC 的 eth_gasPrice */
+  }
+  const gasPrice = hexToBigInt(await rpcRead<Hex>(chain.rpc, 'eth_gasPrice', []))
+  if (gasPrice <= 0n) throw new Error(`无法获取 ${chain.short} gasPrice`)
+  return {
+    maxFeePerGas: (gasPrice * 12n) / 10n,
+    maxPriorityFeePerGas: gasPrice < 1_000_000_000n ? gasPrice : 1_000_000_000n,
+  }
+}
 
 export async function getBundlerGasPrice(
   chain: AaChainConfig,
 ): Promise<{ maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }> {
   const cached = gasPriceCache.get(chain.id)
   if (cached && Date.now() - cached.at < GAS_PRICE_TTL_MS) return cached.value
-  try {
-    const result = await bundlerCall<{
-      standard?: { maxFeePerGas: Hex; maxPriorityFeePerGas: Hex }
-      fast?: { maxFeePerGas: Hex; maxPriorityFeePerGas: Hex }
-      slow?: { maxFeePerGas: Hex; maxPriorityFeePerGas: Hex }
-    }>(chain, 'pimlico_getUserOperationGasPrice', [], 30_000)
-    const bucket = result.standard || result.fast || result.slow
-    if (bucket) {
-      const maxFeePerGas = hexToBigInt(bucket.maxFeePerGas)
-      const maxPriorityFeePerGas = hexToBigInt(bucket.maxPriorityFeePerGas)
-      if (maxFeePerGas > 0n) {
-        const value = { maxFeePerGas, maxPriorityFeePerGas }
-        gasPriceCache.set(chain.id, { at: Date.now(), value })
-        return value
-      }
-    }
-  } catch {
-    /* fallback */
-  }
-  const gasPrice = hexToBigInt(await rpcRead<Hex>(chain.rpc, 'eth_gasPrice', []))
-  if (gasPrice <= 0n) throw new Error(`无法获取 ${chain.short} gasPrice`)
-  const value = {
-    maxFeePerGas: gasPrice,
-    maxPriorityFeePerGas: gasPrice < 1_000_000_000n ? gasPrice : 1_000_000_000n,
-  }
-  gasPriceCache.set(chain.id, { at: Date.now(), value })
-  return value
+  // 批量里 3 个并发 worker 会同时要 gasPrice；共用同一个 in-flight 请求，
+  // 避免缓存未命中时一次打 3 个 bundler 请求。
+  const existing = gasPriceInFlight.get(chain.id)
+  if (existing) return existing
+
+  const pending = loadGasPrice(chain)
+    .then((value) => {
+      gasPriceCache.set(chain.id, { at: Date.now(), value })
+      return value
+    })
+    .finally(() => gasPriceInFlight.delete(chain.id))
+  gasPriceInFlight.set(chain.id, pending)
+  return pending
 }
 
 interface PaymasterState {
@@ -476,16 +456,47 @@ async function signAuthorization(
   }
 }
 
+interface GasEstimate {
+  at: number
+  value: Record<string, bigint>
+}
+
+const gasEstimateCache = new Map<string, GasEstimate>()
+const gasEstimateInFlight = new Map<string, Promise<Record<string, bigint>>>()
+// 同一链、同一激活状态、同一资产、同一调用笔数的 UserOp，gas 上限基本一致。
+// 批量里只估算第一笔，其余复用并加安全缓冲，避免每个钱包都打一次 bundler。
+const GAS_ESTIMATE_TTL_MS = 10 * 60_000
+
+export function gasEstimateKey(
+  chain: AaChainConfig,
+  firstActivation: boolean,
+  token: TokenAsset,
+  calls = 1,
+): string {
+  return `${chain.id}:${firstActivation ? 'first' : 'delegated'}:${token.address.toLowerCase()}:${calls}`
+}
+
+/** 复用估算结果时加缓冲：冷收款地址、不同钱包的签名/授权差异都可能多耗 gas。 */
+export function bufferGasLimit(field: string, value: bigint, reused: boolean): bigint {
+  if (!reused) return value
+  const buffers: Record<string, [bigint, bigint]> = {
+    verificationGasLimit: [125n, 10_000n],
+    callGasLimit: [150n, 20_000n],
+    preVerificationGas: [120n, 5_000n],
+    paymasterVerificationGasLimit: [150n, 20_000n],
+    paymasterPostOpGasLimit: [150n, 10_000n],
+  }
+  const [percent, extra] = buffers[field] ?? [120n, 5_000n]
+  return (value * percent) / 100n + extra
+}
+
 async function estimateUserOpGas(chain: AaChainConfig, op: UserOpJson): Promise<Record<string, bigint>> {
-  const result = await withTransientRetry(
-    () =>
-      bundlerCall<Record<string, string>>(
-        chain,
-        'eth_estimateUserOperationGas',
-        [op, chain.entrypoint],
-        45_000,
-      ),
-    3,
+  const result = await bundlerCall<Record<string, string>>(
+    chain,
+    'eth_estimateUserOperationGas',
+    [op, chain.entrypoint],
+    45_000,
+    120_000,
   )
   const out: Record<string, bigint> = {}
   for (const field of [
@@ -504,6 +515,84 @@ async function estimateUserOpGas(chain: AaChainConfig, op: UserOpJson): Promise<
   return out
 }
 
+interface ReceiptLog {
+  address?: string
+  topics?: string[]
+  data?: Hex
+}
+
+export interface UserOpReceiptRaw {
+  success?: boolean
+  actualGasCost?: Hex
+  logs?: ReceiptLog[]
+  receipt?: {
+    transactionHash?: Hex
+    status?: Hex
+    logs?: ReceiptLog[]
+  }
+}
+
+/** 把 bundler 回执转成钱包结果；费用只认 Circle 的 UserOperationSponsored 事件。 */
+export function parseUserOpReceipt(
+  chain: AaChainConfig,
+  hash: Hex,
+  receipt: UserOpReceiptRaw,
+): AaTransferResult {
+  const txHash = receipt.receipt?.transactionHash
+  let feeUsdc: string | undefined
+  // Circle 的 UserOperationSponsored 里 actualTokenNeeded 才是用户实际支付的 USDC
+  // （base + spread；当前 OP 上 feeTokenAmount 为 0）。actualGasCost 是 native wei，不能当 USDC。
+  for (const log of receipt.logs || receipt.receipt?.logs || []) {
+    if (String(log.address || '').toLowerCase() !== chain.paymaster.toLowerCase()) continue
+    if (!log.topics?.length || log.topics[0].toLowerCase() !== USEROP_SPONSORED_TOPIC.toLowerCase()) continue
+    if (
+      log.topics.length < 3 ||
+      !log.topics[1].toLowerCase().endsWith(chain.feeToken.address.slice(2).toLowerCase())
+    ) {
+      continue
+    }
+    try {
+      const words = decodeAbiParameters(
+        [{ type: 'bytes32' }, { type: 'uint256' }, { type: 'uint256' }, { type: 'uint256' }],
+        (log.data || '0x') as Hex,
+      )
+      feeUsdc = formatUnits(words[2], 6)
+      break
+    } catch {
+      /* 非标准日志忽略 */
+    }
+  }
+  const innerStatus = receipt.receipt?.status
+  const success = innerStatus !== undefined ? innerStatus === '0x1' : receipt.success !== false
+  return {
+    userOpHash: hash,
+    txHash,
+    status: success ? 'success' : 'failed',
+    feeUsdc,
+    explorer: txHash ? `${chain.explorerTx}${txHash}` : chain.explorerTx,
+  }
+}
+
+/** 单次回执查询；排队时间超过 maxWaitMs 会抛 PacerBusyError，不消耗配额。 */
+export async function fetchUserOpReceipt(
+  chain: AaChainConfig,
+  hash: Hex,
+  maxWaitMs = 30_000,
+): Promise<AaTransferResult | null> {
+  const raw = await bundlerCall<UserOpReceiptRaw | null>(
+    chain,
+    'eth_getUserOperationReceipt',
+    [hash],
+    30_000,
+    maxWaitMs,
+  )
+  return raw ? parseUserOpReceipt(chain, hash, raw) : null
+}
+
+/**
+ * 兼容旧调用：按退避轮询回执。
+ * 批量核对已改用 `bundlerBatch`，这里只给单笔场景使用。
+ */
 export async function waitForUserOpReceipt(
   chain: AaChainConfig,
   hash: Hex,
@@ -511,59 +600,97 @@ export async function waitForUserOpReceipt(
   pollMs = 5_000,
 ): Promise<AaTransferResult | null> {
   const start = Date.now()
+  let delay = pollMs
   while (Date.now() - start < timeoutMs) {
+    const remaining = timeoutMs - (Date.now() - start)
     try {
-      const receipt = await bundlerCall<{
-        success?: boolean
-        actualGasCost?: Hex
-        logs?: Array<{ address?: string; topics?: string[]; data?: Hex }>
-        receipt?: {
-          transactionHash?: Hex
-          status?: Hex
-          logs?: Array<{ address?: string; topics?: string[]; data?: Hex }>
-        }
-      } | null>(chain, 'eth_getUserOperationReceipt', [hash], 30_000)
-      if (receipt) {
-        const txHash = receipt.receipt?.transactionHash
-        let feeUsdc: string | undefined
-        // Circle 实际手续费只看 UserOperationSponsored 的 feeTokenAmount；
-        // actualGasCost 是 native wei，不能当 USDC。
-        for (const log of receipt.logs || receipt.receipt?.logs || []) {
-          if (String(log.address || '').toLowerCase() !== chain.paymaster.toLowerCase()) continue
-          if (!log.topics?.length || log.topics[0].toLowerCase() !== USEROP_SPONSORED_TOPIC.toLowerCase()) continue
-          if (
-            log.topics.length < 3 ||
-            !log.topics[1].toLowerCase().endsWith(chain.feeToken.address.slice(2).toLowerCase())
-          ) {
-            continue
-          }
-          try {
-            const words = decodeAbiParameters(
-              [{ type: 'bytes32' }, { type: 'uint256' }, { type: 'uint256' }, { type: 'uint256' }],
-              (log.data || '0x') as Hex,
-            )
-            feeUsdc = formatUnits(words[2], 6)
-            break
-          } catch {
-            /* 非标准日志忽略 */
-          }
-        }
-        const innerStatus = receipt.receipt?.status
-        const success = innerStatus !== undefined ? innerStatus === '0x1' : receipt.success !== false
-        return {
-          userOpHash: hash,
-          txHash,
-          status: success ? 'success' : 'failed',
-          feeUsdc,
-          explorer: txHash ? `${chain.explorerTx}${txHash}` : chain.explorerTx,
-        }
+      const receipt = await fetchUserOpReceipt(chain, hash, Math.min(remaining, 20_000))
+      if (receipt) return receipt
+    } catch (err) {
+      if (err instanceof PacerBusyError) {
+        await sleep(Math.min(err.waitMs, Math.max(0, remaining)))
+        continue
       }
-    } catch {
-      /* bundler 限流/网络抖动时继续等 */
+      /* 网络抖动时继续退避，不在冷却期里打点 */
     }
-    await sleep(pollMs)
+    await sleep(Math.min(delay, Math.max(0, timeoutMs - (Date.now() - start))))
+    delay = Math.min(delay * 2, 30_000)
   }
   return null
+}
+
+/**
+ * 用 EntryPoint nonce（普通 RPC，不占 bundler 配额）等待 UserOp 被打包。
+ * nonce 推进后再查一次 bundler 回执拿交易哈希/手续费。
+ */
+export async function waitForUserOpInclusion(
+  chain: AaChainConfig,
+  sender: string,
+  nonce: bigint,
+  hash: Hex,
+  timeoutMs = 120_000,
+): Promise<AaTransferResult | null> {
+  const start = Date.now()
+  let receiptTries = 0
+  while (Date.now() - start < timeoutMs) {
+    let current: bigint | null = null
+    try {
+      current = await getEntryPointNonce(chain, sender)
+    } catch {
+      /* RPC 抖动：继续等，nonce 查询不占 bundler 配额 */
+    }
+    if (current !== null && current > nonce) {
+      const remaining = Math.max(5_000, timeoutMs - (Date.now() - start))
+      // 批量里回执请求可能排在多个发送后面；给足排队预算，避免把已成功的笔误判为 pending。
+      const receipt = await fetchUserOpReceipt(chain, hash, Math.min(120_000, remaining)).catch(
+        () => null,
+      )
+      if (receipt) return receipt
+      receiptTries += 1
+      if (receiptTries >= 3) {
+        return { userOpHash: hash, status: 'pending', explorer: chain.explorerTx }
+      }
+      await sleep(3_000)
+      continue
+    }
+    await sleep(3_000)
+  }
+  // 执行失败的 UserOp 可能不会推进 nonce，最后再按哈希查一次。
+  return fetchUserOpReceipt(chain, hash, 15_000).catch(() => null)
+}
+
+interface InclusionCheck {
+  receipt: AaTransferResult | null
+  nonceKnown: boolean
+  advanced: boolean
+}
+
+/** 广播报错后，先用免费 RPC 判断 nonce 是否已推进，再决定能否安全重试。 */
+async function inspectInclusion(
+  chain: AaChainConfig,
+  sender: string,
+  nonce: bigint,
+  hash: Hex,
+): Promise<InclusionCheck> {
+  let nonceKnown = false
+  let advanced = false
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const current = await getEntryPointNonce(chain, sender)
+      nonceKnown = true
+      if (current > nonce) {
+        advanced = true
+        break
+      }
+    } catch {
+      /* RPC 抖动：再试一次 */
+    }
+    if (attempt < 2) await sleep(3_000)
+  }
+  const receipt = advanced
+    ? await fetchUserOpReceipt(chain, hash, 120_000).catch(() => null)
+    : null
+  return { receipt, nonceKnown, advanced }
 }
 
 /**
@@ -670,18 +797,56 @@ export async function sendAaTransfer(
     signature: STUB_SIGNATURE,
     authorization,
   })
-  const est = await estimateUserOpGas(chain, estimateOp)
-  const verificationGas = est.verificationGasLimit
-  const callGas = est.callGasLimit
-  const preVerificationGas = est.preVerificationGas
-  const paymasterVerificationGas =
+  const cacheKey = gasEstimateKey(chain, firstActivation, token)
+  const cachedEstimate = gasEstimateCache.get(cacheKey)
+  let est: Record<string, bigint>
+  let reusedEstimate = false
+  if (cachedEstimate && Date.now() - cachedEstimate.at < GAS_ESTIMATE_TTL_MS) {
+    est = cachedEstimate.value
+    reusedEstimate = true
+  } else {
+    // 3 个并发 worker 可能同时命中同一个 key；只让第一个真正估算，其余复用。
+    const existing = gasEstimateInFlight.get(cacheKey)
+    if (existing) {
+      est = await existing
+      reusedEstimate = true
+    } else {
+      const pending = estimateUserOpGas(chain, estimateOp)
+        .then((value) => {
+          gasEstimateCache.set(cacheKey, { at: Date.now(), value })
+          return value
+        })
+        .finally(() => gasEstimateInFlight.delete(cacheKey))
+      gasEstimateInFlight.set(cacheKey, pending)
+      est = await pending
+    }
+  }
+
+  const verificationGas = bufferGasLimit(
+    'verificationGasLimit',
+    est.verificationGasLimit,
+    reusedEstimate,
+  )
+  const callGas = bufferGasLimit('callGasLimit', est.callGasLimit, reusedEstimate)
+  const preVerificationGas = bufferGasLimit(
+    'preVerificationGas',
+    est.preVerificationGas,
+    reusedEstimate,
+  )
+  const paymasterVerificationGas = bufferGasLimit(
+    'paymasterVerificationGasLimit',
     est.paymasterVerificationGasLimit && est.paymasterVerificationGasLimit > 200_000n
       ? est.paymasterVerificationGasLimit
-      : 200_000n
-  const paymasterPostOpGas =
+      : 200_000n,
+    reusedEstimate,
+  )
+  const paymasterPostOpGas = bufferGasLimit(
+    'paymasterPostOpGasLimit',
     est.paymasterPostOpGasLimit && est.paymasterPostOpGasLimit > 50_000n
       ? est.paymasterPostOpGasLimit
-      : 50_000n
+      : 50_000n,
+    reusedEstimate,
+  )
   const totalGas =
     verificationGas + callGas + preVerificationGas + paymasterVerificationGas + paymasterPostOpGas
 
@@ -739,42 +904,66 @@ export async function sendAaTransfer(
     signature,
     authorization,
   })
-  // 从这里开始结果可能不明：先按 userOpHash 查回执，再决定是否重试。
+  // 从这里开始结果可能不明：任何广播错误都先看 nonce/回执，再决定是否重试。
   broadcastStarted = true
-  const delays = [6_000, 15_000, 30_000]
   let returnedHash: Hex | null = null
-  let lastError: unknown = null
-  for (let attempt = 0; attempt <= delays.length; attempt += 1) {
-    try {
-      returnedHash = await bundlerCall<Hex>(
-        chain,
-        'eth_sendUserOperation',
-        [finalOp, chain.entrypoint],
-        45_000,
-      )
-      break
-    } catch (err) {
-      lastError = err
-      // 响应丢失时 UserOp 可能已经上链；同 nonce 重发前必须先查回执。
-      const mined = await waitForUserOpReceipt(chain, userOpHash, 8_000, 2_000).catch(() => null)
-      if (mined) return mined
-      if (!isTransientNetworkError(err)) {
-        throw new PreBroadcastError(
-          `${chain.short} 发送被拒绝：${err instanceof Error ? err.message : String(err)}`,
-          err,
+  try {
+    returnedHash = await bundlerCall<Hex>(
+      chain,
+      'eth_sendUserOperation',
+      [finalOp, chain.entrypoint],
+      60_000,
+      120_000,
+    )
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    const firstCheck = await inspectInclusion(chain, sender, entrypointNonce, userOpHash)
+    if (firstCheck.receipt) return firstCheck.receipt
+
+    const kind = classifyBundlerSendError(err)
+    if (kind === 'retryable' && firstCheck.nonceKnown && !firstCheck.advanced) {
+      // 明确是验证阶段被拒，且 nonce 没动：交易肯定没发出，可安全重试。
+      throw new PreBroadcastError(`${chain.short} 发送被拒绝：${message}`, err)
+    }
+
+    // 网络错误且 nonce 未变：同签名、同 nonce 重试一次是幂等的；
+    // 若已进 mempool，重试会被拒绝，不会产生第二笔。
+    if (isTransientNetworkError(err) && firstCheck.nonceKnown && !firstCheck.advanced) {
+      try {
+        returnedHash = await bundlerCall<Hex>(
+          chain,
+          'eth_sendUserOperation',
+          [finalOp, chain.entrypoint],
+          60_000,
+          120_000,
+        )
+      } catch (retryErr) {
+        const secondCheck = await inspectInclusion(chain, sender, entrypointNonce, userOpHash)
+        if (secondCheck.receipt) return secondCheck.receipt
+        const retryMessage = retryErr instanceof Error ? retryErr.message : String(retryErr)
+        throw new AmbiguousBroadcastError(
+          `${chain.short} 发送结果不明：${retryMessage}`,
+          userOpHash,
         )
       }
-      if (attempt === delays.length) break
-      await sleep(delays[attempt])
+    } else {
+      throw new AmbiguousBroadcastError(
+        `${chain.short} 发送结果不明：${message}`,
+        userOpHash,
+      )
     }
   }
   if (!returnedHash) {
-    throw new AmbiguousBroadcastError(
-      `${chain.short} 发送结果不明：${lastError instanceof Error ? lastError.message : String(lastError)}`,
-      userOpHash,
-    )
+    throw new AmbiguousBroadcastError(`${chain.short} 发送结果不明：未拿到 UserOp 哈希`, userOpHash)
   }
-  const receipt = await waitForUserOpReceipt(chain, returnedHash, 180_000)
+  // 回执等待走普通 RPC 的 EntryPoint nonce，只有 nonce 推进后才查一次 bundler。
+  const receipt = await waitForUserOpInclusion(
+    chain,
+    sender,
+    entrypointNonce,
+    returnedHash,
+    120_000,
+  )
   return (
     receipt ?? {
       userOpHash: returnedHash,

@@ -23,6 +23,7 @@ import { getAaOverview, getBundlerGasPrice, sendAaTransfer } from './evm/op'
 import { reconcileErc20Batch, reconcileUserOps } from './evm/reconcile'
 import type { ReconcileOutcome } from './evm/reconcile'
 import { BroadcastError, rpcRead } from './rpc'
+import { getBundlerThrottleStatus } from './evm/bundler'
 
 interface Props {
   wallets: Array<{ id: number; address: string; privateKey: Hex; label: string }>
@@ -158,8 +159,14 @@ export default function BatchPanel({ wallets, chain, aaChain, asset, defaultWall
   const [reconciling, setReconciling] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const [bundler, setBundler] = useState(() => getBundlerThrottleStatus())
 
   const assetSymbol = asset?.symbol ?? chain.native.symbol
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setBundler(getBundlerThrottleStatus()), 1_000)
+    return () => window.clearInterval(timer)
+  }, [])
 
   useEffect(() => {
     const stored = loadBatch(chain.id)
@@ -486,9 +493,13 @@ export default function BatchPanel({ wallets, chain, aaChain, asset, defaultWall
       </div>
 
       <p className="small muted">
-        同一发送钱包串行（AA ≥1.5s / BSC ≥0.8s），不同钱包最多 3 个并发；每笔广播前检查余额与手续费上限。
-        公共 Pimlico 约 12 次/分钟会限流（约 30 秒恢复），本页已把 bundler 请求节流到 6 秒/次；
-        9 笔批量约 4 分钟，请勿关闭页面。已广播的失败笔不会自动重发；结果不明项可点「核对结果不明项」。
+        同一发送钱包串行，不同钱包最多 3 个并发；每笔广播前检查余额与手续费上限。
+        公共 Pimlico 已改为动态限速：默认每分钟 {bundler.maxLimit} 次（当前 {bundler.limit} 次）、
+        最小间隔 10 秒，遇到限流全局冷却 60 秒；回执等待改用普通 RPC 的 nonce，不再持续轮询 bundler。
+        {bundler.cooldownRemainingMs > 0
+          ? ` 当前冷却中，约 ${Math.ceil(bundler.cooldownRemainingMs / 1000)} 秒后恢复。`
+          : ` 本分钟已用 ${bundler.usedInWindow}/${bundler.limit} 次。`}
+        9 笔批量约 3–4 分钟，请勿关闭页面；已广播的失败笔不会自动重发，结果不明项可点「核对结果不明项」。
       </p>
       {storedAsset && storedAsset !== assetSymbol ? (
         <p className="small muted">上次批次资产：{storedAsset}（重试仍按该资产）</p>

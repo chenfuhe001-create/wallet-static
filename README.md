@@ -19,9 +19,9 @@
 ## 网络失败与重试
 
 - **广播前失败**（读 RPC、估算 gas、签名）：交易肯定没发出，批量里标「失败」且可重试。
-- **广播调用失败**（`eth_sendRawTransaction` / `eth_sendUserOperation` 抛错）：结果可能不明，标「结果不明」并停止该钱包后续笔；有哈希时先按哈希查回执，没有哈希再点「核对发送地址」看 nonce/交易，不要直接重发。
-- **公共 Pimlico 限流**：约 12 次/分钟会触发 WAF（约 30 秒恢复）。批量已把 bundler 请求全局节流到 6 秒/次；9 笔约 4 分钟，期间不要关闭页面或开多个标签。
-- **结果不明项核对**：优先查 UserOp 回执；没有 UserOp 哈希的旧记录按 USDC `Transfer` 日志的 from/to/金额精确匹配，找到即成功，找不到才可重试。
+- **广播调用失败**（`eth_sendRawTransaction` / `eth_sendUserOperation` 抛错）：先查链上 nonce/回执；只有确认 nonce 未变且错误是验证阶段拒绝，才标「失败」可重试。网络错误、`AA25`、`already known` 等一律标「结果不明」并停止该钱包后续笔，避免双花。
+- **公共 Pimlico 限流**：官方 20 次/分钟/IP，实测更容易触发 WAF。bundler 请求现在走全局滑动窗口（默认 5 次/分钟、最小间隔 10 秒）；遇到 HTTP 429 / `Failed to fetch` 全局冷却 60 秒并降速，冷却期不再轮询。回执等待改用普通 RPC 的 EntryPoint nonce，打包后只查一次回执；批量核对用 JSON-RPC 批量。9 笔约 3–4 分钟，期间不要关闭页面或开多个标签。
+- **结果不明项核对**：优先批量查 UserOp 回执；没有 UserOp 哈希的旧记录按 USDC `Transfer` 日志的 from/to/金额精确匹配，找到即成功，找不到才可重试。
 - 页面底部显示构建时间（UTC），用于确认 GitHub Pages 是否已更新；Pages 有缓存，必要时强制刷新。
 
 ## 本地开发
@@ -61,6 +61,7 @@ npm run build
 - [x] 多资产转账（USDC / USDT0 / USDT；gas 固定 USDC）
 - [ ] 新链真实 canary（Base/Arbitrum/Polygon 各 0.01 USDC，待用户批准）
 - [x] 批量转账（一个→多个地址、多个→一个地址；逐笔签名、非原子、结果恢复）
+- [x] bundler 动态限速/冷却、gas 估算复用、nonce 等待回执、批量回执核对
 - [ ] 批量真实 canary（BSC 0.001 BNB ×3 / OP 0.01 USDC ×2，待用户批准）
 - [x] 本地指纹（WebAuthn PRF）：PRF → HKDF → AES-GCM 包装密码，改密/导入/清除后失效
 - [ ] 本地地址本（未列入本期）

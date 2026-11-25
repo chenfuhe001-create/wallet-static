@@ -19,8 +19,12 @@ import {
 import { getAsset } from '../chains'
 import type { AaChainConfig, TokenAsset } from '../chains'
 import { rpcRead } from '../rpc'
+import type { RpcBatchItem } from '../rpc'
+import { bundlerBatch } from './bundler'
+import { PacerBusyError } from './limiter'
 import type { BatchItem } from './batch'
-import { waitForUserOpReceipt } from './op'
+import { parseUserOpReceipt } from './op'
+import type { UserOpReceiptRaw } from './op'
 
 const TRANSFER_TOPIC = keccak256(stringToHex('Transfer(address,address,uint256)'))
 
@@ -167,21 +171,55 @@ export async function reconcileErc20Batch(
   return outcomes
 }
 
-/** 有 UserOp 哈希的项：直接查 bundler 回执；暂无回执不判失败。 */
+/**
+ * 有 UserOp 哈希的项：一次 JSON-RPC 批量查回执，避免每笔都打一次 bundler。
+ * 暂无回执不判失败；bundler 冷却时保持「不明」，等冷却后再点核对。
+ */
 export async function reconcileUserOps(
   chain: AaChainConfig,
   items: BatchItem[],
 ): Promise<ReconcileOutcome[]> {
-  const outcomes: ReconcileOutcome[] = []
-  for (const item of items) {
-    if (item.status !== 'unknown' || !item.userOpHash) continue
-    const receipt = await waitForUserOpReceipt(chain, item.userOpHash as Hex, 6_000, 1_500).catch(
-      () => null,
+  const targets = items.filter(
+    (item): item is BatchItem & { userOpHash: string } =>
+      item.status === 'unknown' && Boolean(item.userOpHash),
+  )
+  if (!targets.length) return []
+
+  let batch: Map<number, RpcBatchItem<UserOpReceiptRaw | null>>
+  try {
+    batch = await bundlerBatch<UserOpReceiptRaw | null>(
+      chain,
+      targets.map((item, index) => ({
+        id: index,
+        method: 'eth_getUserOperationReceipt',
+        params: [item.userOpHash],
+      })),
+      30_000,
+      20_000,
     )
-    if (!receipt) {
-      outcomes.push({ id: item.id, status: 'unknown', note: '暂无 UserOp 回执，可能仍在打包' })
+  } catch (err) {
+    const note =
+      err instanceof PacerBusyError
+        ? 'bundler 正在冷却，请等倒计时结束再核对'
+        : `bundler 查询失败：${err instanceof Error ? err.message : String(err)}`
+    return targets.map((item) => ({ id: item.id, status: 'unknown' as const, note }))
+  }
+
+  const outcomes: ReconcileOutcome[] = []
+  for (let index = 0; index < targets.length; index += 1) {
+    const item = targets[index]
+    const response = batch.get(index)
+    if (!response || response.error || !response.result) {
+      outcomes.push({
+        id: item.id,
+        status: 'unknown',
+        note: response?.error?.message
+          ? `回执查询失败：${response.error.message}`
+          : '暂无 UserOp 回执，可能仍在打包',
+      })
       continue
     }
+    const receipt = parseUserOpReceipt(chain, item.userOpHash as Hex, response.result)
     outcomes.push({
       id: item.id,
       status: receipt.status === 'success' ? 'success' : 'failed',

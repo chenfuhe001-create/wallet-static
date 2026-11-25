@@ -24,7 +24,7 @@ import { privateKeyToAccount } from 'viem/accounts'
 import type { Hex } from 'viem'
 import { feeCapFor, getAsset } from '../chains'
 import type { AaChainConfig, TokenAsset } from '../chains'
-import { rpcCall, rpcRead, sleep, type RpcEndpoint } from '../rpc'
+import { PreBroadcastError, rpcCall, rpcRead, sleep, type RpcEndpoint } from '../rpc'
 
 const USEROP_TYPEHASH = keccak256(
   stringToHex(
@@ -496,6 +496,8 @@ export async function sendAaTransfer(
   chain: AaChainConfig,
   input: AaTransferInput,
 ): Promise<AaTransferResult> {
+  let broadcastStarted = false
+  try {
   if (!isAddress(input.to)) throw new Error('收款地址格式不正确')
   const token = getAsset(chain, input.asset)
   const amount = parseUnits(input.amount || '0', token.decimals)
@@ -659,6 +661,8 @@ export async function sendAaTransfer(
     signature,
     authorization,
   })
+  // 从这里开始结果可能不明；之后的网络错误不能自动重发。
+  broadcastStarted = true
   const returnedHash = await rpcCall<Hex>(
     bundlerEndpoint(chain),
     'eth_sendUserOperation',
@@ -673,4 +677,13 @@ export async function sendAaTransfer(
       explorer: chain.explorerTx,
     }
   )
+  } catch (err) {
+    if (!broadcastStarted) {
+      throw new PreBroadcastError(
+        `${chain.short} 发送前失败：${err instanceof Error ? err.message : String(err)}`,
+        err,
+      )
+    }
+    throw err
+  }
 }

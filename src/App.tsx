@@ -865,7 +865,8 @@ export default function App() {
       ) : null}
 
       <footer className="muted small">
-        本地签名 · 直连公共 RPC · 服务器不接触密码/私钥。大额建议使用硬件钱包或多签。
+        本地签名 · 直连公共 RPC · 服务器不接触密码/私钥 · 构建{' '}
+        {__BUILD_TIME__.slice(0, 16).replace('T', ' ')} UTC。大额建议使用硬件钱包或多签。
       </footer>
     </div>
   )

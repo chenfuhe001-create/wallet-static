@@ -7,6 +7,7 @@ import {
   runBatch,
 } from '../src/evm/batch'
 import type { BatchItem, BatchSenderAdapter, BatchSendResult } from '../src/evm/batch'
+import { PreBroadcastError } from '../src/rpc'
 
 const FROM_A = '0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A'
 const FROM_B = '0x000000000000000000000000000000000000dEaD'
@@ -160,6 +161,27 @@ describe('批量转账：执行器', () => {
     expect(items[1].hash).toBe(`0x${'12'.repeat(32)}`)
     expect(items[1].error).toContain('上链')
     expect(isRetryable(items[1])).toBe(false)
+  })
+
+  it('广播前的网络失败标为失败且可重试，不阻塞后续笔', async () => {
+    const adapter = fakeAdapter(FROM_A, async (to) => {
+      if (to === TO_2) throw new PreBroadcastError('BSC 发送前失败：Failed to fetch')
+      return { status: 'success', hash: `0x${'56'.repeat(32)}` }
+    })
+    const items = await runBatch(
+      planOf([
+        [FROM_A, TO_1],
+        [FROM_A, TO_2],
+        [FROM_A, TO_3],
+      ]),
+      new Map([[FROM_A, adapter]]),
+      { sleep: async () => {} },
+    )
+    expect(items.map((item) => item.status)).toEqual(['success', 'failed', 'success'])
+    expect(items[1].broadcasted).toBe(false)
+    expect(items[1].error).toContain('Failed to fetch')
+    expect(isRetryable(items[1])).toBe(true)
+    expect(adapter.calls).toHaveLength(3)
   })
 
   it('发送抛错按结果不明处理，停止该钱包后续笔', async () => {

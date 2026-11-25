@@ -12,6 +12,14 @@ export class RpcError extends Error {
   }
 }
 
+/** 广播前的失败（读 RPC/估算/签名）：交易肯定没有发出，可安全重试。 */
+export class PreBroadcastError extends Error {
+  constructor(message: string, readonly cause?: unknown) {
+    super(message)
+    this.name = 'PreBroadcastError'
+  }
+}
+
 /** 已广播但链上执行失败的交易；批量重试时必须识别，避免重复转账。 */
 export class BroadcastError extends Error {
   constructor(message: string, readonly hash: string) {

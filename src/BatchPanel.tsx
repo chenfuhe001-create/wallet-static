@@ -18,9 +18,9 @@ import type {
   BatchPlanItem,
   BatchSenderAdapter,
 } from './evm/batch'
-import { estimateNativeTransfer, getNativeBalance, sendNative } from './evm/native'
-import { getAaOverview, sendAaTransfer } from './evm/op'
-import { BroadcastError } from './rpc'
+import { estimateNativeTransfer, getNativeBalance, getNativeGasPrice, sendNative } from './evm/native'
+import { getAaOverview, getBundlerGasPrice, sendAaTransfer } from './evm/op'
+import { BroadcastError, rpcRead } from './rpc'
 
 interface Props {
   wallets: Array<{ id: number; address: string; privateKey: Hex; label: string }>
@@ -152,6 +152,7 @@ export default function BatchPanel({ wallets, chain, aaChain, asset, defaultWall
   const [items, setItems] = useState<BatchItem[]>([])
   const [storedAsset, setStoredAsset] = useState('')
   const [running, setRunning] = useState(false)
+  const [diagnosing, setDiagnosing] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
 
@@ -274,6 +275,31 @@ export default function BatchPanel({ wallets, chain, aaChain, asset, defaultWall
     await execute(targets)
   }
 
+  const diagnose = async () => {
+    setDiagnosing(true)
+    setError('')
+    setNotice('正在检测当前链的 RPC/bundler…')
+    try {
+      const raw = await rpcRead<string>(chain.rpc, 'eth_chainId', [])
+      const actual = BigInt(raw)
+      if (actual !== BigInt(chain.id)) {
+        throw new Error(`RPC chainId=${actual}，不是 ${chain.short}(${chain.id})`)
+      }
+      if (aaChain) {
+        const gas = await getBundlerGasPrice(aaChain)
+        setNotice(`RPC 正常（chainId ${chain.id}）；bundler gas ${gas.maxFeePerGas} wei`)
+      } else {
+        const gas = await getNativeGasPrice(chain)
+        setNotice(`RPC 正常（chainId ${chain.id}）；gasPrice ${gas} wei`)
+      }
+    } catch (err) {
+      setNotice('')
+      setError(`网络诊断失败：${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setDiagnosing(false)
+    }
+  }
+
   const clear = () => {
     if (items.length && !window.confirm('清除本机保存的批次记录？链上交易不受影响。')) return
     clearBatch(chain.id)
@@ -375,6 +401,9 @@ export default function BatchPanel({ wallets, chain, aaChain, asset, defaultWall
         <button className="primary" onClick={() => void start()} disabled={running || !wallets.length}>
           {running ? '批量执行中…' : '开始批量转账'}
         </button>
+        <button className="ghost" onClick={() => void diagnose()} disabled={running || diagnosing}>
+          {diagnosing ? '检测中…' : '网络诊断'}
+        </button>
         <button className="ghost" onClick={clear} disabled={running || !items.length}>
           清除记录
         </button>
@@ -414,6 +443,21 @@ export default function BatchPanel({ wallets, chain, aaChain, asset, defaultWall
                   {item.fee ? ` · 手续费 ${item.fee}` : ''}
                 </div>
                 {item.error ? <div className="small batchError">{item.error}</div> : null}
+                {item.status === 'unknown' && !item.hash ? (
+                  <div className="small muted">
+                    没有记录到哈希；请先核对发送地址的 nonce/交易记录，再决定是否重试。
+                  </div>
+                ) : null}
+                {item.status === 'failed' || item.status === 'unknown' ? (
+                  <a
+                    className="small"
+                    href={`${(chain.explorerTx ?? '').replace('/tx/', '/address/')}${item.from}`}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    核对发送地址
+                  </a>
+                ) : null}
                 {item.hash ? (
                   <a
                     className="mono small"

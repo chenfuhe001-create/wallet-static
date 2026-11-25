@@ -8,6 +8,7 @@
  */
 
 import { isAddress } from 'viem'
+import { PreBroadcastError } from '../rpc'
 
 export type BatchMode = 'one-to-many' | 'many-to-one'
 
@@ -213,7 +214,12 @@ export async function runBatch(
             blocked = '上一笔结果不明'
           }
         } catch (err) {
-          // 发送调用抛错时无法判断请求是否已到 bundler/RPC：按“结果不明”处理，
+          if (err instanceof PreBroadcastError) {
+            // 读 RPC/估算/签名阶段失败：交易肯定没发出，可以安全重试。
+            update(item, { status: 'failed', broadcasted: false, error: err.message })
+            continue
+          }
+          // 广播调用抛错时无法判断请求是否已到 bundler/RPC：按“结果不明”处理，
           // 不自动重发；并停止该钱包后续笔，避免 nonce 冲突。
           update(item, {
             status: 'unknown',

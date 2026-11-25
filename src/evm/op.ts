@@ -43,6 +43,10 @@ const FETCH_PRICE_SELECTOR = keccak256(stringToHex('fetchPrice()')).slice(0, 10)
 const FEE_SPREAD_SELECTOR = keccak256(stringToHex('feeSpread()')).slice(0, 10) as Hex
 const ADDITIONAL_GAS_SELECTOR = keccak256(stringToHex('additionalGasCharge()')).slice(0, 10) as Hex
 
+const USEROP_SPONSORED_TOPIC = keccak256(
+  stringToHex('UserOperationSponsored(address,address,bytes32,uint256,uint256,uint256)'),
+)
+
 const STUB_SIGNATURE: Hex =
   '0xfffffffffffffffffffffffffffffff0000000000000000000000000000000007aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1c'
 const MAX_UINT256 = (1n << 256n) - 1n
@@ -389,15 +393,33 @@ async function waitForUserOpReceipt(hash: Hex, timeoutMs = 120_000): Promise<OpT
       const receipt = await rpcCall<{
         success?: boolean
         actualGasCost?: Hex
+        logs?: Array<{ address?: string; topics?: string[]; data?: Hex }>
         receipt?: { transactionHash?: Hex; status?: Hex }
       } | null>(BUNDLER_ENDPOINT, 'eth_getUserOperationReceipt', [hash], 30_000)
       if (receipt) {
         const txHash = receipt.receipt?.transactionHash
+        let feeUsdc: string | undefined
+        // Circle 实际手续费只看 UserOperationSponsored 的 feeTokenAmount；
+        // actualGasCost 是 native wei，不能当 USDC。
+        for (const log of receipt.logs || []) {
+          if (String(log.address || '').toLowerCase() !== OP.paymaster.toLowerCase()) continue
+          if (!log.topics?.length || log.topics[0].toLowerCase() !== USEROP_SPONSORED_TOPIC.toLowerCase()) continue
+          try {
+            const words = decodeAbiParameters(
+              [{ type: 'bytes32' }, { type: 'uint256' }, { type: 'uint256' }, { type: 'uint256' }],
+              (log.data || '0x') as Hex,
+            )
+            feeUsdc = formatUnits(words[2], 6)
+            break
+          } catch {
+            /* 非标准日志忽略 */
+          }
+        }
         return {
           userOpHash: hash,
           txHash,
           status: receipt.success === false ? 'failed' : 'success',
-          feeUsdc: receipt.actualGasCost ? formatUnits(hexToBigInt(receipt.actualGasCost), 6) : undefined,
+          feeUsdc,
           explorer: txHash ? `${OP.explorerTx}${txHash}` : OP.explorerTx,
         }
       }

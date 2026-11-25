@@ -9,6 +9,7 @@ import {
   parseVaultJson,
   unlockVault,
 } from './crypto/vault'
+import { OP } from './chains'
 import { computeUserOpHash } from './evm/op'
 
 const PASSWORD = 'selftest-password-123'
@@ -62,17 +63,20 @@ export default function SelfTest() {
 
         out.push('5/6 UserOp EIP-712 hash/sign…')
         setLines([...out])
-        const userOpHash = computeUserOpHash({
-          sender: account.address,
-          nonce: 7n,
-          initCode: '0x',
-          callData: '0xdeadbeef',
-          accountGasLimits:
-            '0x0000000000000000000000000001b2070000000000000000000000000003640e' as Hex,
-          preVerificationGas: 120000n,
-          gasFees: '0x000000000000000000000000000f4240000000000000000000000000001e8480' as Hex,
-          paymasterAndData: '0x',
-        })
+        const userOpHash = computeUserOpHash(
+          {
+            sender: account.address,
+            nonce: 7n,
+            initCode: '0x',
+            callData: '0xdeadbeef',
+            accountGasLimits:
+              '0x0000000000000000000000000001b2070000000000000000000000000003640e' as Hex,
+            preVerificationGas: 120000n,
+            gasFees: '0x000000000000000000000000000f4240000000000000000000000000001e8480' as Hex,
+            paymasterAndData: '0x',
+          },
+          OP,
+        )
         const sig = await account.sign({ hash: userOpHash })
         if (sig.length !== 132) throw new Error('UserOp 签名长度异常')
         out.push(`5/6 ok hash=${userOpHash.slice(0, 10)}… sig=${sig.slice(0, 10)}…`)

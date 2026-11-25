@@ -4,7 +4,8 @@
 
 - 前端：Vite + React + TypeScript
 - 加密：libsodium（Argon2id + XChaCha20-Poly1305 + HKDF-SHA256），格式与 web 项目 `wallet_core.py` 兼容
-- 链交互：viem + 浏览器直连公共 RPC（BSC 原生 BNB；OP Circle v0.8 AA / 7702 / USDC gas）
+- 链交互：viem + 浏览器直连公共 RPC（BSC 原生 BNB；7 条链 Circle v0.8 AA / 7702 / USDC gas）
+- 多链注册表：`src/chains.ts`；转账资产 USDC/USDT0/USDT 只从注册表取，前端不能传任意合约地址
 - 托管：GitHub Pages（`docs/`），与 API 服务器分离
 
 ## 安全模型
@@ -47,7 +48,9 @@ npm run build
 - [x] OP / Circle v0.8 AA（USDC permit、7702 授权、paymasterData、Pimlico 直连）
 - [x] 本地改密 / 重新加密备份
 - [x] 真实链上 canary（用户确认 BSC/OP 小额转账成功）
-- [ ] 多链扩展（Base/Arbitrum/Ethereum/Polygon/Avalanche/Unichain）
+- [x] 多链扩展（Base/Arbitrum/Ethereum/Polygon/Avalanche/Unichain）：注册表 + 7 链只读核验
+- [x] 多资产转账（USDC / USDT0 / USDT；gas 固定 USDC）
+- [ ] 新链真实 canary（Base/Arbitrum/Polygon 各 0.01 USDC，待用户批准）
 - [ ] 批量转账（一个→多个地址、多个→一个地址）
 - [ ] 本地指纹（WebAuthn PRF）
 - [ ] 本地地址本（未列入本期）

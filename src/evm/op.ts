@@ -1,8 +1,11 @@
 /**
- * Optimism + Circle Paymaster v0.8 + EIP-7702 的本地 AA 实现。
+ * Circle Paymaster v0.8 + EIP-7702 的本地 AA 实现（多链参数化）。
  *
  * 所有签名（permit / UserOp / 7702 授权）都在浏览器完成；bundler 只接收
  * 已签名的 UserOp，无法改收款地址/金额。服务器完全不参与。
+ *
+ * 链、资产、Paymaster/EntryPoint/7702 实现地址、费用上限全部来自
+ * `chains.ts` 注册表；本模块不接受任意合约地址参数。
  */
 
 import {
@@ -19,7 +22,8 @@ import {
 } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import type { Hex } from 'viem'
-import { OP } from '../chains'
+import { feeCapFor, getAsset } from '../chains'
+import type { AaChainConfig, TokenAsset } from '../chains'
 import { rpcCall, rpcRead, sleep, type RpcEndpoint } from '../rpc'
 
 const USEROP_TYPEHASH = keccak256(
@@ -50,28 +54,39 @@ const USEROP_SPONSORED_TOPIC = keccak256(
 const STUB_SIGNATURE: Hex =
   '0xfffffffffffffffffffffffffffffff0000000000000000000000000000000007aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1c'
 const MAX_UINT256 = (1n << 256n) - 1n
-const BUNDLER_ENDPOINT: RpcEndpoint = { url: OP.bundler, label: 'Pimlico' }
 
-export interface OpDelegation {
+function bundlerEndpoint(chain: AaChainConfig): RpcEndpoint {
+  return { url: chain.bundler, label: 'Pimlico' }
+}
+
+export interface AaDelegation {
   status: 'none' | 'delegated' | 'contract' | 'unknown'
   implementation?: string
   codeLength: number
 }
 
-export interface OpOverview {
+export interface AaAssetBalance {
+  symbol: string
   address: string
-  usdc: string
-  eth: string
-  delegation: OpDelegation
+  balance: string
 }
 
-export interface OpTransferInput {
+export interface AaOverview {
+  address: string
+  native: string
+  assets: AaAssetBalance[]
+  delegation: AaDelegation
+}
+
+export interface AaTransferInput {
   privateKey: Hex
   to: string
-  amountUsdc: string
+  amount: string
+  /** 资产符号，只认链注册表里登记过的资产。 */
+  asset: string
 }
 
-export interface OpTransferResult {
+export interface AaTransferResult {
   userOpHash: Hex
   txHash?: Hex
   status: 'success' | 'failed' | 'pending'
@@ -125,18 +140,26 @@ function readStringResult(raw: Hex): string {
   }
 }
 
-async function readUint(to: string, data: Hex): Promise<bigint> {
-  const raw = await rpcRead<Hex>(OP.rpc, 'eth_call', [{ to, data }, 'latest'])
+async function readUint(chain: AaChainConfig, to: string, data: Hex): Promise<bigint> {
+  const raw = await rpcRead<Hex>(chain.rpc, 'eth_call', [{ to, data }, 'latest'])
   return hexToBigInt(raw)
 }
 
-async function readTokenString(token: string, selector: Hex): Promise<string> {
-  const raw = await rpcRead<Hex>(OP.rpc, 'eth_call', [{ to: token, data: selector }, 'latest'])
+async function readTokenString(chain: AaChainConfig, token: string, selector: Hex): Promise<string> {
+  const raw = await rpcRead<Hex>(chain.rpc, 'eth_call', [{ to: token, data: selector }, 'latest'])
   return readStringResult(raw)
 }
 
-export async function getDelegation(address: string): Promise<OpDelegation> {
-  const code = await rpcRead<Hex>(OP.rpc, 'eth_getCode', [address, 'latest'])
+async function readTokenBalance(chain: AaChainConfig, token: TokenAsset, owner: string): Promise<bigint> {
+  return readUint(
+    chain,
+    token.address,
+    concat([BALANCE_OF_SELECTOR, encodeAbiParameters([{ type: 'address' }], [owner as Hex])]),
+  )
+}
+
+export async function getDelegation(chain: AaChainConfig, address: string): Promise<AaDelegation> {
+  const code = await rpcRead<Hex>(chain.rpc, 'eth_getCode', [address, 'latest'])
   if (!code || code === '0x') return { status: 'none', codeLength: 0 }
   if (code.length === 48 && code.startsWith('0xef0100')) {
     return {
@@ -148,28 +171,35 @@ export async function getDelegation(address: string): Promise<OpDelegation> {
   return { status: 'contract', codeLength: (code.length - 2) / 2 }
 }
 
-export async function getOpOverview(address: string): Promise<OpOverview> {
+export async function getAaOverview(chain: AaChainConfig, address: string): Promise<AaOverview> {
   if (!isAddress(address)) throw new Error('地址格式不正确')
-  const [usdcRaw, ethRaw, delegation] = await Promise.all([
-    readUint(OP.usdc, concat([BALANCE_OF_SELECTOR, encodeAbiParameters([{ type: 'address' }], [address])])),
-    rpcRead<Hex>(OP.rpc, 'eth_getBalance', [address, 'latest']),
-    getDelegation(address),
+  const [nativeRaw, delegation, ...tokenBalances] = await Promise.all([
+    rpcRead<Hex>(chain.rpc, 'eth_getBalance', [address, 'latest']),
+    getDelegation(chain, address),
+    ...chain.assets.map((asset) => readTokenBalance(chain, asset, address)),
   ])
   return {
     address,
-    usdc: formatUnits(usdcRaw, 6),
-    eth: formatUnits(hexToBigInt(ethRaw), 18),
+    native: formatUnits(hexToBigInt(nativeRaw), chain.native.decimals),
+    assets: chain.assets.map((asset, index) => ({
+      symbol: asset.symbol,
+      address: asset.address,
+      balance: formatUnits(tokenBalances[index] ?? 0n, asset.decimals),
+    })),
     delegation,
   }
 }
 
-export async function getBundlerGasPrice(): Promise<{ maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }> {
+export async function getBundlerGasPrice(
+  chain: AaChainConfig,
+): Promise<{ maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }> {
+  const endpoint = bundlerEndpoint(chain)
   try {
     const result = await rpcCall<{
       standard?: { maxFeePerGas: Hex; maxPriorityFeePerGas: Hex }
       fast?: { maxFeePerGas: Hex; maxPriorityFeePerGas: Hex }
       slow?: { maxFeePerGas: Hex; maxPriorityFeePerGas: Hex }
-    }>(BUNDLER_ENDPOINT, 'pimlico_getUserOperationGasPrice', [], 30_000)
+    }>(endpoint, 'pimlico_getUserOperationGasPrice', [], 30_000)
     const bucket = result.standard || result.fast || result.slow
     if (bucket) {
       const maxFeePerGas = hexToBigInt(bucket.maxFeePerGas)
@@ -179,8 +209,8 @@ export async function getBundlerGasPrice(): Promise<{ maxFeePerGas: bigint; maxP
   } catch {
     /* fallback */
   }
-  const gasPrice = hexToBigInt(await rpcRead<Hex>(OP.rpc, 'eth_gasPrice', []))
-  if (gasPrice <= 0n) throw new Error('无法获取 OP gasPrice')
+  const gasPrice = hexToBigInt(await rpcRead<Hex>(chain.rpc, 'eth_gasPrice', []))
+  if (gasPrice <= 0n) throw new Error(`无法获取 ${chain.short} gasPrice`)
   return { maxFeePerGas: gasPrice, maxPriorityFeePerGas: gasPrice < 1_000_000_000n ? gasPrice : 1_000_000_000n }
 }
 
@@ -190,11 +220,11 @@ interface PaymasterState {
   additionalGasCharge: bigint
 }
 
-export async function getPaymasterState(): Promise<PaymasterState> {
+export async function getPaymasterState(chain: AaChainConfig): Promise<PaymasterState> {
   const [price, spread, additional] = await Promise.all([
-    readUint(OP.paymaster, FETCH_PRICE_SELECTOR),
-    readUint(OP.paymaster, FEE_SPREAD_SELECTOR),
-    readUint(OP.paymaster, ADDITIONAL_GAS_SELECTOR),
+    readUint(chain, chain.paymaster, FETCH_PRICE_SELECTOR),
+    readUint(chain, chain.paymaster, FEE_SPREAD_SELECTOR),
+    readUint(chain, chain.paymaster, ADDITIONAL_GAS_SELECTOR),
   ])
   if (price <= 0n) throw new Error('Circle Paymaster 价格预言机不可读')
   return {
@@ -210,41 +240,45 @@ function estimatePrefund(input: {
   maxFeePerGas: bigint
   totalGas: bigint
   feeSpreadBips: bigint
+  nativeDecimals: number
 }): bigint {
   const gasCost = (input.totalGas + input.additionalGasCharge) * input.maxFeePerGas
-  const base = (gasCost * input.nativeTokenPrice) / 10n ** 18n + 1n
+  const base = (gasCost * input.nativeTokenPrice) / 10n ** BigInt(input.nativeDecimals) + 1n
   const spread = (base * input.feeSpreadBips) / 10_000n
   return base + spread
 }
 
-async function getEntryPointNonce(sender: string): Promise<bigint> {
+async function getEntryPointNonce(chain: AaChainConfig, sender: string): Promise<bigint> {
   const data = concat([
     GET_NONCE_SELECTOR,
     encodeAbiParameters([{ type: 'address' }, { type: 'uint192' }], [sender as Hex, 0n]),
   ])
-  return readUint(OP.entrypoint, data)
+  return readUint(chain, chain.entrypoint, data)
 }
 
-async function getPermitNonce(owner: string): Promise<bigint> {
-  return readUint(OP.usdc, concat([NONCES_SELECTOR, encodeAbiParameters([{ type: 'address' }], [owner as Hex])]))
+async function getPermitNonce(chain: AaChainConfig, owner: string): Promise<bigint> {
+  return readUint(
+    chain,
+    chain.feeToken.address,
+    concat([NONCES_SELECTOR, encodeAbiParameters([{ type: 'address' }], [owner as Hex])]),
+  )
 }
 
-async function getUsdcBalance(owner: string): Promise<bigint> {
-  return readUint(OP.usdc, concat([BALANCE_OF_SELECTOR, encodeAbiParameters([{ type: 'address' }], [owner as Hex])]))
-}
-
-export function computeUserOpHash(input: {
-  sender: string
-  nonce: bigint
-  initCode: Hex
-  callData: Hex
-  accountGasLimits: Hex
-  preVerificationGas: bigint
-  gasFees: Hex
-  paymasterAndData: Hex
-  delegate?: string
-  factoryData?: Hex
-}): Hex {
+export function computeUserOpHash(
+  input: {
+    sender: string
+    nonce: bigint
+    initCode: Hex
+    callData: Hex
+    accountGasLimits: Hex
+    preVerificationGas: bigint
+    gasFees: Hex
+    paymasterAndData: Hex
+    delegate?: string
+    factoryData?: Hex
+  },
+  chain: AaChainConfig,
+): Hex {
   const hashInit = input.delegate
     ? keccak256(concat([input.delegate as Hex, input.factoryData || '0x']))
     : keccak256(input.initCode)
@@ -283,7 +317,7 @@ export function computeUserOpHash(input: {
         { type: 'uint256' },
         { type: 'address' },
       ],
-      [DOMAIN_TYPEHASH, ERC4337_NAME_HASH, ERC4337_VERSION_HASH, BigInt(OP.id), OP.entrypoint as Hex],
+      [DOMAIN_TYPEHASH, ERC4337_NAME_HASH, ERC4337_VERSION_HASH, BigInt(chain.id), chain.entrypoint as Hex],
     ),
   )
   return keccak256(concat(['0x1901', domain, structHash]))
@@ -308,21 +342,24 @@ interface UserOpJson {
   eip7702Auth?: Record<string, string>
 }
 
-function buildUserOp(input: {
-  sender: string
-  nonce: bigint
-  callData: Hex
-  verificationGas: bigint
-  callGas: bigint
-  preVerificationGas: bigint
-  maxFeePerGas: bigint
-  maxPriorityFeePerGas: bigint
-  paymasterData: Hex
-  paymasterVerificationGas: bigint
-  paymasterPostOpGas: bigint
-  signature: Hex
-  authorization?: Record<string, string>
-}): UserOpJson {
+function buildUserOp(
+  chain: AaChainConfig,
+  input: {
+    sender: string
+    nonce: bigint
+    callData: Hex
+    verificationGas: bigint
+    callGas: bigint
+    preVerificationGas: bigint
+    maxFeePerGas: bigint
+    maxPriorityFeePerGas: bigint
+    paymasterData: Hex
+    paymasterVerificationGas: bigint
+    paymasterPostOpGas: bigint
+    signature: Hex
+    authorization?: Record<string, string>
+  },
+): UserOpJson {
   const op: UserOpJson = {
     sender: input.sender,
     nonce: hx(input.nonce),
@@ -332,7 +369,7 @@ function buildUserOp(input: {
     preVerificationGas: hx(input.preVerificationGas),
     maxFeePerGas: hx(input.maxFeePerGas),
     maxPriorityFeePerGas: hx(input.maxPriorityFeePerGas),
-    paymaster: OP.paymaster,
+    paymaster: chain.paymaster,
     paymasterData: input.paymasterData,
     paymasterVerificationGasLimit: hx(input.paymasterVerificationGas),
     paymasterPostOpGasLimit: hx(input.paymasterPostOpGas),
@@ -346,15 +383,19 @@ function buildUserOp(input: {
   return op
 }
 
-async function signAuthorization(account: ReturnType<typeof privateKeyToAccount>, nonce: bigint) {
+async function signAuthorization(
+  chain: AaChainConfig,
+  account: ReturnType<typeof privateKeyToAccount>,
+  nonce: bigint,
+) {
   const signed = await account.signAuthorization({
-    chainId: OP.id,
-    address: OP.implementation,
+    chainId: chain.id,
+    address: chain.implementation,
     nonce: Number(nonce),
   })
   return {
-    address: OP.implementation,
-    chainId: `0x${OP.id.toString(16)}`,
+    address: chain.implementation,
+    chainId: `0x${chain.id.toString(16)}`,
     nonce: `0x${nonce.toString(16)}`,
     yParity: `0x${Number(signed.yParity).toString(16)}`,
     r: signed.r,
@@ -362,11 +403,11 @@ async function signAuthorization(account: ReturnType<typeof privateKeyToAccount>
   }
 }
 
-async function estimateUserOpGas(op: UserOpJson): Promise<Record<string, bigint>> {
+async function estimateUserOpGas(chain: AaChainConfig, op: UserOpJson): Promise<Record<string, bigint>> {
   const result = await rpcCall<Record<string, string>>(
-    BUNDLER_ENDPOINT,
+    bundlerEndpoint(chain),
     'eth_estimateUserOperationGas',
-    [op, OP.entrypoint],
+    [op, chain.entrypoint],
     45_000,
   )
   const out: Record<string, bigint> = {}
@@ -386,7 +427,11 @@ async function estimateUserOpGas(op: UserOpJson): Promise<Record<string, bigint>
   return out
 }
 
-async function waitForUserOpReceipt(hash: Hex, timeoutMs = 120_000): Promise<OpTransferResult | null> {
+async function waitForUserOpReceipt(
+  chain: AaChainConfig,
+  hash: Hex,
+  timeoutMs = 120_000,
+): Promise<AaTransferResult | null> {
   const start = Date.now()
   while (Date.now() - start < timeoutMs) {
     try {
@@ -399,16 +444,21 @@ async function waitForUserOpReceipt(hash: Hex, timeoutMs = 120_000): Promise<OpT
           status?: Hex
           logs?: Array<{ address?: string; topics?: string[]; data?: Hex }>
         }
-      } | null>(BUNDLER_ENDPOINT, 'eth_getUserOperationReceipt', [hash], 30_000)
+      } | null>(bundlerEndpoint(chain), 'eth_getUserOperationReceipt', [hash], 30_000)
       if (receipt) {
         const txHash = receipt.receipt?.transactionHash
         let feeUsdc: string | undefined
         // Circle 实际手续费只看 UserOperationSponsored 的 feeTokenAmount；
         // actualGasCost 是 native wei，不能当 USDC。
         for (const log of receipt.logs || receipt.receipt?.logs || []) {
-          if (String(log.address || '').toLowerCase() !== OP.paymaster.toLowerCase()) continue
+          if (String(log.address || '').toLowerCase() !== chain.paymaster.toLowerCase()) continue
           if (!log.topics?.length || log.topics[0].toLowerCase() !== USEROP_SPONSORED_TOPIC.toLowerCase()) continue
-          if (log.topics.length < 3 || !log.topics[1].toLowerCase().endsWith(OP.usdc.slice(2).toLowerCase())) continue
+          if (
+            log.topics.length < 3 ||
+            !log.topics[1].toLowerCase().endsWith(chain.feeToken.address.slice(2).toLowerCase())
+          ) {
+            continue
+          }
           try {
             const words = decodeAbiParameters(
               [{ type: 'bytes32' }, { type: 'uint256' }, { type: 'uint256' }, { type: 'uint256' }],
@@ -427,7 +477,7 @@ async function waitForUserOpReceipt(hash: Hex, timeoutMs = 120_000): Promise<OpT
           txHash,
           status: success ? 'success' : 'failed',
           feeUsdc,
-          explorer: txHash ? `${OP.explorerTx}${txHash}` : OP.explorerTx,
+          explorer: txHash ? `${chain.explorerTx}${txHash}` : chain.explorerTx,
         }
       }
     } catch {
@@ -439,56 +489,69 @@ async function waitForUserOpReceipt(hash: Hex, timeoutMs = 120_000): Promise<OpT
 }
 
 /**
- * 用本地私钥发一笔 OP USDC（Circle Paymaster 付 gas）。
- * 流程与服务器 wallet_aa 完全同口径，但私钥/签名不离开浏览器。
+ * 用本地私钥发一笔 AA 转账（gas 由 Circle Paymaster 以 USDC 支付）。
+ * 流程与服务器 wallet_aa 同口径，但私钥/签名不离开浏览器。
  */
-export async function sendOpUsdc(input: OpTransferInput): Promise<OpTransferResult> {
+export async function sendAaTransfer(
+  chain: AaChainConfig,
+  input: AaTransferInput,
+): Promise<AaTransferResult> {
   if (!isAddress(input.to)) throw new Error('收款地址格式不正确')
-  const amount = parseUnits(input.amountUsdc || '0', 6)
+  const token = getAsset(chain, input.asset)
+  const amount = parseUnits(input.amount || '0', token.decimals)
   if (amount <= 0n) throw new Error('金额必须大于 0')
 
   const account = privateKeyToAccount(input.privateKey)
   const sender = account.address
-  const chainId = hexToBigInt(await rpcRead<Hex>(OP.rpc, 'eth_chainId', []))
-  if (chainId !== BigInt(OP.id)) throw new Error(`RPC chainId=${chainId}，不是 OP(${OP.id})`)
+  const chainId = hexToBigInt(await rpcRead<Hex>(chain.rpc, 'eth_chainId', []))
+  if (chainId !== BigInt(chain.id)) throw new Error(`RPC chainId=${chainId}，不是 ${chain.short}(${chain.id})`)
 
-  const delegation = await getDelegation(sender)
+  const delegation = await getDelegation(chain, sender)
   if (delegation.status === 'contract') throw new Error('发送地址是合约，无法用 7702 钱包')
   if (
     delegation.status === 'delegated' &&
-    delegation.implementation?.toLowerCase() !== OP.implementation.toLowerCase()
+    delegation.implementation?.toLowerCase() !== chain.implementation.toLowerCase()
   ) {
     throw new Error(`该地址已委托到其他 7702 实现：${delegation.implementation}`)
   }
   const firstActivation = delegation.status === 'none'
 
-  const cap = parseUnits(firstActivation ? OP.firstFeeCapUsdc : OP.feeCapUsdc, 6)
-  const balance = await getUsdcBalance(sender)
-  if (balance < amount + cap) throw new Error('USDC 余额不足以支付金额和手续费上限')
+  const cap = feeCapFor(chain, firstActivation)
+  const [feeBalance, assetBalance] = await Promise.all([
+    readTokenBalance(chain, chain.feeToken, sender),
+    token.address.toLowerCase() === chain.feeToken.address.toLowerCase()
+      ? Promise.resolve(0n)
+      : readTokenBalance(chain, token, sender),
+  ])
+  const feeTokenIsAsset = token.address.toLowerCase() === chain.feeToken.address.toLowerCase()
+  if (feeTokenIsAsset ? feeBalance < amount + cap : feeBalance < cap) {
+    throw new Error(`${chain.feeToken.symbol} 余额不足以支付手续费上限`)
+  }
+  if (!feeTokenIsAsset && assetBalance < amount) throw new Error(`${token.symbol} 余额不足`)
 
   const [entrypointNonce, fee, tokenName, tokenVersion, permitNonce] = await Promise.all([
-    getEntryPointNonce(sender),
-    getBundlerGasPrice(),
-    readTokenString(OP.usdc, NAME_SELECTOR),
-    readTokenString(OP.usdc, VERSION_SELECTOR),
-    getPermitNonce(sender),
+    getEntryPointNonce(chain, sender),
+    getBundlerGasPrice(chain),
+    readTokenString(chain, chain.feeToken.address, NAME_SELECTOR),
+    readTokenString(chain, chain.feeToken.address, VERSION_SELECTOR),
+    getPermitNonce(chain, sender),
   ])
 
   let authorization: Record<string, string> | undefined
   if (firstActivation) {
     const txCount = hexToBigInt(
-      await rpcRead<Hex>(OP.rpc, 'eth_getTransactionCount', [sender, 'pending']),
+      await rpcRead<Hex>(chain.rpc, 'eth_getTransactionCount', [sender, 'pending']),
     )
-    authorization = await signAuthorization(account, txCount)
+    authorization = await signAuthorization(chain, account, txCount)
   }
 
-  // EIP-2612 permit：spender = Circle Paymaster，额度 = 本链手续费上限
+  // EIP-2612 permit：spender = Circle Paymaster，额度 = 本链手续费上限（USDC）
   const permitSignature = await account.signTypedData({
     domain: {
       name: tokenName,
       version: tokenVersion,
-      chainId: OP.id,
-      verifyingContract: OP.usdc,
+      chainId: chain.id,
+      verifyingContract: chain.feeToken.address,
     },
     types: {
       Permit: [
@@ -502,17 +565,17 @@ export async function sendOpUsdc(input: OpTransferInput): Promise<OpTransferResu
     primaryType: 'Permit',
     message: {
       owner: sender,
-      spender: OP.paymaster,
+      spender: chain.paymaster,
       value: cap,
       nonce: permitNonce,
       deadline: MAX_UINT256,
     },
   })
 
-  const pmData = packPaymasterData(OP.usdc, cap, permitSignature)
-  const callData = encodeExecute(OP.usdc, 0n, encodeErc20Transfer(input.to, amount))
+  const pmData = packPaymasterData(chain.feeToken.address, cap, permitSignature)
+  const callData = encodeExecute(token.address, 0n, encodeErc20Transfer(input.to, amount))
 
-  const estimateOp = buildUserOp({
+  const estimateOp = buildUserOp(chain, {
     sender,
     nonce: entrypointNonce,
     callData,
@@ -527,7 +590,7 @@ export async function sendOpUsdc(input: OpTransferInput): Promise<OpTransferResu
     signature: STUB_SIGNATURE,
     authorization,
   })
-  const est = await estimateUserOpGas(estimateOp)
+  const est = await estimateUserOpGas(chain, estimateOp)
   const verificationGas = est.verificationGasLimit
   const callGas = est.callGasLimit
   const preVerificationGas = est.preVerificationGas
@@ -542,39 +605,46 @@ export async function sendOpUsdc(input: OpTransferInput): Promise<OpTransferResu
   const totalGas =
     verificationGas + callGas + preVerificationGas + paymasterVerificationGas + paymasterPostOpGas
 
-  const pm = await getPaymasterState()
+  const pm = await getPaymasterState(chain)
   const prefund = estimatePrefund({
     nativeTokenPrice: pm.nativeTokenPrice,
     additionalGasCharge: pm.additionalGasCharge,
     maxFeePerGas: fee.maxFeePerGas,
     totalGas,
     feeSpreadBips: pm.feeSpreadBips,
+    nativeDecimals: chain.native.decimals,
   })
   if (prefund > cap) {
     throw new Error(`预计手续费 ${formatUnits(prefund, 6)} USDC 超过本链上限 ${formatUnits(cap, 6)}`)
   }
-  if (balance < amount + prefund) throw new Error('USDC 余额不足以支付金额和实际手续费')
+  if (feeTokenIsAsset ? feeBalance < amount + prefund : feeBalance < prefund) {
+    throw new Error(`${chain.feeToken.symbol} 余额不足以支付实际手续费`)
+  }
+  if (!feeTokenIsAsset && assetBalance < amount) throw new Error(`${token.symbol} 余额不足`)
 
-  const userOpHash = computeUserOpHash({
-    sender,
-    nonce: entrypointNonce,
-    initCode: '0x',
-    callData,
-    accountGasLimits: pack128(verificationGas, callGas),
-    preVerificationGas,
-    gasFees: pack128(fee.maxPriorityFeePerGas, fee.maxFeePerGas),
-    paymasterAndData: packPaymasterAndData(
-      OP.paymaster,
-      paymasterVerificationGas,
-      paymasterPostOpGas,
-      pmData,
-    ),
-    delegate: authorization ? OP.implementation : undefined,
-    factoryData: '0x',
-  })
+  const userOpHash = computeUserOpHash(
+    {
+      sender,
+      nonce: entrypointNonce,
+      initCode: '0x',
+      callData,
+      accountGasLimits: pack128(verificationGas, callGas),
+      preVerificationGas,
+      gasFees: pack128(fee.maxPriorityFeePerGas, fee.maxFeePerGas),
+      paymasterAndData: packPaymasterAndData(
+        chain.paymaster,
+        paymasterVerificationGas,
+        paymasterPostOpGas,
+        pmData,
+      ),
+      delegate: authorization ? chain.implementation : undefined,
+      factoryData: '0x',
+    },
+    chain,
+  )
   const signature = await account.sign({ hash: userOpHash })
 
-  const finalOp = buildUserOp({
+  const finalOp = buildUserOp(chain, {
     sender,
     nonce: entrypointNonce,
     callData,
@@ -590,17 +660,17 @@ export async function sendOpUsdc(input: OpTransferInput): Promise<OpTransferResu
     authorization,
   })
   const returnedHash = await rpcCall<Hex>(
-    BUNDLER_ENDPOINT,
+    bundlerEndpoint(chain),
     'eth_sendUserOperation',
-    [finalOp, OP.entrypoint],
+    [finalOp, chain.entrypoint],
     45_000,
   )
-  const receipt = await waitForUserOpReceipt(returnedHash)
+  const receipt = await waitForUserOpReceipt(chain, returnedHash)
   return (
     receipt ?? {
       userOpHash: returnedHash,
       status: 'pending',
-      explorer: OP.explorerTx,
+      explorer: chain.explorerTx,
     }
   )
 }

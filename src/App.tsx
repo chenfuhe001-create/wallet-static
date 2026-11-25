@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import type { Hex } from 'viem'
-import { BSC, OP } from './chains'
+import { BSC, CHAINS, feeCapFor, getAaChain } from './chains'
+import type { AaChainConfig } from './chains'
 import {
   addWallet,
   changePassword,
@@ -15,8 +16,8 @@ import {
 import type { EncryptedVault, OpenedVault } from './crypto/vault'
 import { clearStoredVault, loadStoredVault, saveStoredVault } from './storage'
 import { estimateBnbTransfer, getBscBalance, sendBnb } from './evm/bsc'
-import { getOpOverview, sendOpUsdc } from './evm/op'
-import type { OpOverview } from './evm/op'
+import { getAaOverview, sendAaTransfer } from './evm/op'
+import type { AaOverview } from './evm/op'
 
 type View = 'locked' | 'unlock' | 'create'
 
@@ -35,9 +36,9 @@ function short(addr: string): string {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`
 }
 
-function delegationLabel(status?: string, implementation?: string): string {
+function delegationLabel(chain: AaChainConfig, status?: string, implementation?: string): string {
   if (status === 'delegated') {
-    return implementation && implementation.toLowerCase() !== OP.implementation.toLowerCase()
+    return implementation && implementation.toLowerCase() !== chain.implementation.toLowerCase()
       ? '7702 其他实现'
       : '7702 已激活'
   }
@@ -67,8 +68,9 @@ export default function App() {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [balances, setBalances] = useState<Record<string, string>>({})
-  const [chain, setChain] = useState<'bsc' | 'op'>('bsc')
-  const [opBalances, setOpBalances] = useState<Record<string, OpOverview>>({})
+  const [chainId, setChainId] = useState<number>(BSC.id)
+  const [overviews, setOverviews] = useState<Record<string, AaOverview>>({})
+  const [assetSymbol, setAssetSymbol] = useState('USDC')
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [transfer, setTransfer] = useState<TransferState>(EMPTY_TRANSFER)
   const [reveal, setReveal] = useState<{ address: string; privateKey: Hex } | null>(null)
@@ -98,6 +100,12 @@ export default function App() {
     [opened],
   )
   const selected = activeWallets.find((w) => w.id === selectedId) || activeWallets[0] || null
+  // AA 链只从注册表取；chainId 由本页 select 产生，不会出现未知链。
+  const aaChain: AaChainConfig | null = chainId === BSC.id ? null : getAaChain(chainId)
+  const chain = aaChain ?? BSC
+  const asset = aaChain ? (aaChain.assets.find((a) => a.symbol === assetSymbol) ?? aaChain.feeToken) : null
+  const selectedOverview =
+    aaChain && selected ? overviews[`${aaChain.id}:${selected.address}`] : undefined
 
   const resetSecretState = () => {
     setPassword('')
@@ -178,7 +186,7 @@ export default function App() {
   const refreshBalances = async (vault: OpenedVault | null = opened) => {
     if (!vault) return
     const active = vault.wallets.filter((w) => w.status !== 'deleted')
-    if (chain === 'bsc') {
+    if (!aaChain) {
       const next: Record<string, string> = {}
       await Promise.all(
         active.map(async (w) => {
@@ -193,23 +201,26 @@ export default function App() {
       setBalances((old) => ({ ...old, ...next }))
       return
     }
-    const next: Record<string, OpOverview> = {}
+    const next: Record<string, AaOverview> = {}
     await Promise.all(
       active.map(async (w) => {
         try {
-          next[w.address] = await getOpOverview(w.address)
+          next[`${aaChain.id}:${w.address}`] = await getAaOverview(aaChain, w.address)
         } catch {
           /* 单地址失败不影响其他 */
         }
       }),
     )
-    setOpBalances((old) => ({ ...old, ...next }))
+    setOverviews((old) => ({ ...old, ...next }))
   }
 
   useEffect(() => {
+    // 切换链后旧表单/资产不能沿用；余额按新链重新读。
+    setTransfer(EMPTY_TRANSFER)
+    if (aaChain && !aaChain.assets.some((item) => item.symbol === assetSymbol)) setAssetSymbol('USDC')
     if (opened) void refreshBalances(opened)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chain])
+  }, [chainId])
 
   const persist = async (vault: OpenedVault) => {
     await saveStoredVault(vault.data)
@@ -335,27 +346,30 @@ export default function App() {
     }
   }
 
-  const sendOp = async () => {
-    if (!selected) return
+  const sendAa = async () => {
+    if (!selected || !aaChain || !asset) return
+    const cap = feeCapFor(aaChain, selectedOverview?.delegation.status === 'none')
     if (
       !window.confirm(
-        `确认从 ${selected.address} 转出 ${transfer.amount} USDC（OP）到 ${transfer.to}？\n\n` +
-          '首次使用会自动做 EIP-7702 激活；gas 用 USDC 支付，手续费上限 0.05（首次 0.10）USDC。\n交易在本地签名，不可撤销。',
+        `确认从 ${selected.address} 在 ${aaChain.name} 转出 ${transfer.amount} ${asset.symbol} 到 ${transfer.to}？\n\n` +
+          `gas 用 USDC 支付；本次手续费上限 ${Number(cap) / 1e6} USDC。\n交易在本地签名，不可撤销。`,
       )
     ) {
       return
     }
     setTransfer((s) => ({ ...s, busy: true, error: '', result: '' }))
     try {
-      const res = await sendOpUsdc({
+      const res = await sendAaTransfer(aaChain, {
         privateKey: selected.privateKey,
         to: transfer.to,
-        amountUsdc: transfer.amount,
+        amount: transfer.amount,
+        asset: asset.symbol,
       })
       setTransfer((s) => ({
         ...s,
         busy: false,
         result: [
+          `${aaChain.short} · ${asset.symbol}`,
           `UserOp：${res.userOpHash}`,
           res.txHash ? `交易：${res.txHash}` : '',
           res.feeUsdc ? `手续费：${res.feeUsdc} USDC` : '',
@@ -477,7 +491,8 @@ export default function App() {
         <div>
           <h1>本地钱包</h1>
           <p className="muted">
-            {activeWallets.length} 个钱包 · {chain === 'bsc' ? 'BSC' : 'OP'} · 已解锁
+            {activeWallets.length} 个钱包 · {chain.short}
+            {aaChain ? ` · ${asset?.symbol ?? ''}` : ''} · 已解锁
           </p>
         </div>
         <div className="row">
@@ -491,12 +506,30 @@ export default function App() {
       </header>
 
       <div className="row chainTabs">
-        <button className={chain === 'bsc' ? 'primary' : 'ghost'} onClick={() => setChain('bsc')}>
-          BSC · BNB
-        </button>
-        <button className={chain === 'op' ? 'primary' : 'ghost'} onClick={() => setChain('op')}>
-          OP · USDC（AA）
-        </button>
+        <select
+          className="select"
+          value={chainId}
+          onChange={(e) => setChainId(Number(e.target.value))}
+          aria-label="选择链"
+        >
+          {CHAINS.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.short} · {c.native.symbol}
+              {'aa' in c ? ' · AA' : ''}
+            </option>
+          ))}
+        </select>
+        {aaChain
+          ? aaChain.assets.map((a) => (
+              <button
+                key={a.symbol}
+                className={a.symbol === asset?.symbol ? 'primary' : 'ghost'}
+                onClick={() => setAssetSymbol(a.symbol)}
+              >
+                {a.symbol}
+              </button>
+            ))
+          : null}
         <span className="small muted">切换只影响查询/转账，不改钱包</span>
       </div>
 
@@ -520,35 +553,39 @@ export default function App() {
         </div>
 
         <div className="list">
-          {activeWallets.map((w) => (
-            <button
-              key={w.id}
-              className={`walletRow ${selected?.id === w.id ? 'active' : ''}`}
-              onClick={() => setSelectedId(w.id)}
-            >
-              <div>
-                <div className="walletTitle">
-                  #{w.id} {w.label || '未命名'}
+          {activeWallets.map((w) => {
+            const overview = aaChain ? overviews[`${aaChain.id}:${w.address}`] : undefined
+            return (
+              <button
+                key={w.id}
+                className={`walletRow ${selected?.id === w.id ? 'active' : ''}`}
+                onClick={() => setSelectedId(w.id)}
+              >
+                <div>
+                  <div className="walletTitle">
+                    #{w.id} {w.label || '未命名'}
+                  </div>
+                  <div className="mono small">{w.address}</div>
                 </div>
-                <div className="mono small">{w.address}</div>
-              </div>
-              <div className="right">
-                <div className="mono">
-                  {chain === 'bsc'
-                    ? `${balances[w.address] ?? '—'} BNB`
-                    : `${opBalances[w.address]?.usdc ?? '—'} USDC`}
+                <div className="right">
+                  <div className="mono">
+                    {aaChain
+                      ? `${overview?.assets.find((a) => a.symbol === asset?.symbol)?.balance ?? '—'} ${asset?.symbol ?? ''}`
+                      : `${balances[w.address] ?? '—'} BNB`}
+                  </div>
+                  <div className="small muted">
+                    {aaChain
+                      ? delegationLabel(
+                          aaChain,
+                          overview?.delegation.status,
+                          overview?.delegation.implementation,
+                        )
+                      : short(w.address)}
+                  </div>
                 </div>
-                <div className="small muted">
-                  {chain === 'op'
-                    ? delegationLabel(
-                        opBalances[w.address]?.delegation.status,
-                        opBalances[w.address]?.delegation.implementation,
-                      )
-                    : short(w.address)}
-                </div>
-              </div>
-            </button>
-          ))}
+              </button>
+            )
+          })}
         </div>
 
         <div className="row importRow">
@@ -590,7 +627,7 @@ export default function App() {
 
       {selected ? (
         <>
-          {chain === 'bsc' ? (
+          {!aaChain ? (
           <section className="card">
             <div className="row space">
               <h2>转账 · BSC（BNB）</h2>
@@ -630,17 +667,25 @@ export default function App() {
               私钥只在点击按钮后用于本地签名；广播请求只包含已签名交易，不含私钥。
             </p>
           </section>
-          ) : (
+          ) : aaChain ? (
           <section className="card">
             <div className="row space">
-              <h2>转账 · OP（USDC，gas 用 USDC）</h2>
+              <h2>转账 · {aaChain.name} · {asset?.symbol}</h2>
               <span className="small muted">#{selected.id} {short(selected.address)}</span>
             </div>
             <p className="small muted">
-              USDC 余额：{opBalances[selected.address]?.usdc ?? '—'} · 7702：
+              {aaChain.assets
+                .map(
+                  (a) =>
+                    `${a.symbol} ${selectedOverview?.assets.find((x) => x.symbol === a.symbol)?.balance ?? '—'}`,
+                )
+                .join(' · ')}
+              {' · '}原生 {selectedOverview?.native ?? '—'} {aaChain.native.symbol}
+              {' · '}7702：
               {delegationLabel(
-                opBalances[selected.address]?.delegation.status,
-                opBalances[selected.address]?.delegation.implementation,
+                aaChain,
+                selectedOverview?.delegation.status,
+                selectedOverview?.delegation.implementation,
               )}
             </p>
             <input
@@ -652,22 +697,22 @@ export default function App() {
             <input
               value={transfer.amount}
               onChange={(e) => setTransfer((s) => ({ ...s, amount: e.target.value }))}
-              placeholder="金额（USDC）"
+              placeholder={`金额（${asset?.symbol ?? ''}）`}
               inputMode="decimal"
             />
             <div className="row">
-              <button className="primary" onClick={() => void sendOp()} disabled={transfer.busy}>
+              <button className="primary" onClick={() => void sendAa()} disabled={transfer.busy || !asset}>
                 {transfer.busy ? '签名/提交中…' : '本地签名并提交 UserOp'}
               </button>
             </div>
             {transfer.result ? <pre className="result">{transfer.result}</pre> : null}
             {transfer.error ? <div className="error">{transfer.error}</div> : null}
             <p className="small muted">
-              首次自动 7702 激活；permit/UserOp/授权全部本地签名，bundler 只收到已签名 UserOp。
-              建议先用 0.01 USDC 验证。
+              gas 用 USDC 支付（permit 上限 {aaChain.feeCapUsdc}，首次激活 {aaChain.firstFeeCapUsdc} USDC）；
+              permit/UserOp/7702 授权全部本地签名，bundler 只收到已签名 UserOp。建议先用 0.01 验证。
             </p>
           </section>
-          )}
+          ) : null}
 
           <section className="card">
             <div className="row space">
@@ -695,7 +740,7 @@ export default function App() {
       ) : null}
 
       <footer className="muted small">
-        本地签名 · 直连 BSC RPC · 服务器不接触密码/私钥。大额建议使用硬件钱包或多签。
+        本地签名 · 直连公共 RPC · 服务器不接触密码/私钥。大额建议使用硬件钱包或多签。
       </footer>
     </div>
   )

@@ -12,6 +12,14 @@ export class RpcError extends Error {
   }
 }
 
+/** 已广播但链上执行失败的交易；批量重试时必须识别，避免重复转账。 */
+export class BroadcastError extends Error {
+  constructor(message: string, readonly hash: string) {
+    super(message)
+    this.name = 'BroadcastError'
+  }
+}
+
 export async function rpcCall<T = unknown>(
   endpoint: RpcEndpoint,
   method: string,

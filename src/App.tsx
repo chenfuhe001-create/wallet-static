@@ -16,6 +16,7 @@ import {
 import type { EncryptedVault, OpenedVault } from './crypto/vault'
 import { clearStoredVault, loadStoredVault, saveStoredVault } from './storage'
 import { estimateBnbTransfer, getBscBalance, sendBnb } from './evm/bsc'
+import BatchPanel from './BatchPanel'
 import { getAaOverview, sendAaTransfer } from './evm/op'
 import type { AaOverview } from './evm/op'
 
@@ -624,6 +625,15 @@ export default function App() {
           <p className="small muted">迁移后建议改一次密码，旧服务器用过的密码立即失效。</p>
         </details>
       </section>
+
+      <BatchPanel
+        key={chain.id}
+        wallets={activeWallets}
+        chain={chain}
+        aaChain={aaChain}
+        asset={asset}
+        defaultWalletId={selected?.id ?? null}
+      />
 
       {selected ? (
         <>

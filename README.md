@@ -51,7 +51,8 @@ npm run build
 - [x] 多链扩展（Base/Arbitrum/Ethereum/Polygon/Avalanche/Unichain）：注册表 + 7 链只读核验
 - [x] 多资产转账（USDC / USDT0 / USDT；gas 固定 USDC）
 - [ ] 新链真实 canary（Base/Arbitrum/Polygon 各 0.01 USDC，待用户批准）
-- [ ] 批量转账（一个→多个地址、多个→一个地址）
+- [x] 批量转账（一个→多个地址、多个→一个地址；逐笔签名、非原子、结果恢复）
+- [ ] 批量真实 canary（BSC 0.001 BNB ×3 / OP 0.01 USDC ×2，待用户批准）
 - [ ] 本地指纹（WebAuthn PRF）
 - [ ] 本地地址本（未列入本期）
 

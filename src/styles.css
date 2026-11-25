@@ -40,3 +40,17 @@ button.danger { background: #450a0a66; border-color: #7f1d1d; color: #fca5a5; }
 .qrWrap { display: flex; justify-content: center; background: #fff; border-radius: 16px; padding: 12px; margin: 10px 0; }
 footer { margin-top: 20px; text-align: center; }
 .select { border: 1px solid #1e293b; background: #0b1220; color: #e2e8f0; border-radius: 12px; padding: 10px 12px; max-width: 100%; }
+
+.batchPanel { display: block; }
+.batchSummary { cursor: pointer; font-size: 14px; color: #cbd5e1; }
+.batchPanel textarea { width: 100%; border: 1px solid #1e293b; background: #020617cc; color: #e2e8f0; border-radius: 12px; padding: 11px 12px; margin: 6px 0; outline: none; resize: vertical; font: inherit; }
+.batchPanel textarea:focus { border-color: #0891b2; }
+.batchCheck { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #cbd5e1; }
+.batchCheck input { width: auto; margin: 0; }
+.batchItem { border: 1px solid #162033; background: #02061780; border-radius: 12px; padding: 10px 12px; }
+.batchStatus { font-size: 11px; color: #94a3b8; }
+.batchStatus.success { color: #6ee7b7; }
+.batchStatus.failed { color: #fca5a5; }
+.batchStatus.unknown { color: #fbbf24; }
+.batchStatus.signing, .batchStatus.submitting, .batchStatus.waiting { color: #67e8f9; }
+.batchError { color: #fca5a5; margin-top: 2px; }

@@ -21,6 +21,8 @@ export interface ChainConfig {
   short: string
   rpc: RpcEndpoint[]
   native: NativeAsset
+  /** 区块浏览器交易前缀；批量结果只提供链接，不自动查证。 */
+  explorerTx?: string
 }
 
 export const BSC: ChainConfig = {
@@ -29,6 +31,7 @@ export const BSC: ChainConfig = {
   name: 'BNB Smart Chain',
   short: 'BSC',
   native: { symbol: 'BNB', name: 'BNB', decimals: 18 },
+  explorerTx: 'https://bscscan.com/tx/',
   rpc: [
     { url: 'https://bsc-dataseed.binance.org', label: 'Binance' },
     { url: 'https://bsc-dataseed1.binance.org', label: 'Binance 1' },

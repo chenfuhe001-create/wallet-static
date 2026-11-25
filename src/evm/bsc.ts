@@ -4,7 +4,7 @@ import { formatEther, isAddress, parseEther, parseGwei } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import type { Hex } from 'viem'
 import { BSC } from '../chains'
-import { hexToBigInt, rpcCall, rpcRead, sleep, toHex, RpcError } from '../rpc'
+import { BroadcastError, hexToBigInt, rpcCall, rpcRead, sleep, toHex, RpcError } from '../rpc'
 
 export interface BscBalance {
   wei: bigint
@@ -19,6 +19,7 @@ export interface BscSendInput {
 }
 
 export interface BscSendResult {
+  status: 'success' | 'pending'
   hash: Hex
   from: string
   to: string
@@ -138,9 +139,16 @@ export async function sendBnb(input: BscSendInput): Promise<BscSendResult> {
   })
   // 广播只打一次；网络错误时结果可能不明，界面提示先查浏览器，不自动重发
   const hash = await rpcCall<Hex>(BSC.rpc[0], 'eth_sendRawTransaction', [signed])
-  const receipt = await waitForBscReceipt(hash)
+  let receipt: Awaited<ReturnType<typeof waitForBscReceipt>>
+  try {
+    receipt = await waitForBscReceipt(hash)
+  } catch {
+    // 已广播但回执查询失败：结果不明，不能当成失败让调用方重发。
+    receipt = null
+  }
   if (!receipt) {
     return {
+      status: 'pending',
       hash,
       from,
       to: input.to,
@@ -151,9 +159,10 @@ export async function sendBnb(input: BscSendInput): Promise<BscSendResult> {
     }
   }
   if (receipt.status === 'failed') {
-    throw new Error(`交易已上链但执行失败，金额未转出；哈希 ${hash}`)
+    throw new BroadcastError(`交易已上链但执行失败，金额未转出；哈希 ${hash}`, hash)
   }
   return {
+    status: 'success',
     hash,
     from,
     to: input.to,

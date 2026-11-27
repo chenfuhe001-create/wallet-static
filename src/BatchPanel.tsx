@@ -25,6 +25,7 @@ import { reconcileErc20Batch, reconcileUserOps } from './evm/reconcile'
 import type { ReconcileOutcome } from './evm/reconcile'
 import { BroadcastError, rpcRead } from './rpc'
 import { getBundlerThrottleStatus } from './evm/bundler'
+import AddressBookDialog from './AddressBookDialog'
 
 interface Props {
   wallets: Array<{ id: number; address: string; privateKey: Hex; label: string }>
@@ -166,6 +167,7 @@ export default function BatchPanel({ wallets, chain, aaChain, assetSymbol, defau
   const [senderIds, setSenderIds] = useState<number[]>([])
   const [localRecipientIds, setLocalRecipientIds] = useState<number[]>([])
   const [recipientText, setRecipientText] = useState('')
+  const [bookOpen, setBookOpen] = useState(false)
   const [amount, setAmount] = useState('')
   const [items, setItems] = useState<BatchItem[]>([])
   const [storedAsset, setStoredAsset] = useState('')
@@ -459,6 +461,12 @@ export default function BatchPanel({ wallets, chain, aaChain, assetSymbol, defau
             spellCheck={false}
             disabled={running}
           />
+          <div className="row">
+            <button className="ghost" onClick={() => setBookOpen(true)} disabled={running}>
+              从地址簿选择
+            </button>
+            <span className="small muted">选中后会追加到上方地址列表</span>
+          </div>
           <details className="importRow">
             <summary className="small muted">
               从本地钱包勾选收款地址（已选 {localRecipientIds.length} 个）
@@ -500,13 +508,18 @@ export default function BatchPanel({ wallets, chain, aaChain, assetSymbol, defau
               </label>
             ))}
           </div>
-          <input
-            value={recipientText}
-            onChange={(e) => setRecipientText(e.target.value)}
-            placeholder="收款地址 0x…（只能 1 个）"
-            spellCheck={false}
-            disabled={running}
-          />
+          <div className="row bookPick">
+            <input
+              value={recipientText}
+              onChange={(e) => setRecipientText(e.target.value)}
+              placeholder="收款地址 0x…（只能 1 个）"
+              spellCheck={false}
+              disabled={running}
+            />
+            <button className="ghost" onClick={() => setBookOpen(true)} disabled={running}>
+              地址簿
+            </button>
+          </div>
         </>
       )}
 
@@ -609,6 +622,26 @@ export default function BatchPanel({ wallets, chain, aaChain, assetSymbol, defau
             ))}
           </div>
         </>
+      ) : null}
+
+      {bookOpen ? (
+        <AddressBookDialog
+          mode="pick"
+          onClose={() => setBookOpen(false)}
+          onPick={(entry) => {
+            setRecipientText((current) =>
+              mode === 'one-to-many'
+                ? current.trim()
+                  ? `${current.trimEnd()}\n${entry.address}`
+                  : entry.address
+                : entry.address,
+            )
+          }}
+          onToast={(message, type) => {
+            if (type === 'error') setError(message)
+            else setNotice(message)
+          }}
+        />
       ) : null}
     </details>
   )

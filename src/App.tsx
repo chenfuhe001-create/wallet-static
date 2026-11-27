@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
+import { formatUnits } from 'viem'
 import type { Hex } from 'viem'
-import { BSC, CHAINS, feeCapFor, getChain, isAaChain, isNativeAssetSymbol } from './chains'
+import { ALL_CHAINS, BSC, BITCOIN, feeCapFor, getChain, getKnownChain, isAaChain, isBitcoinChain, isNativeAssetSymbol } from './chains'
 import type { AaChainConfig } from './chains'
 import {
   addWallet,
@@ -25,6 +26,11 @@ import {
 } from './crypto/fingerprint'
 import { estimateNativeTransfer, getNativeBalance, sendNative } from './evm/native'
 import BatchPanel from './BatchPanel'
+import AddressBookDialog from './AddressBookDialog'
+import { addressBookService } from './addressBook/client'
+import BitcoinWorkspace from './BitcoinWorkspace'
+import { fetchBitcoinBalance } from './bitcoin/send'
+import type { BitcoinBalance } from './bitcoin/types'
 import { getAaOverview, sendAaTransfer } from './evm/op'
 import type { AaOverview } from './evm/op'
 
@@ -80,8 +86,10 @@ export default function App() {
   // 默认以太坊 AA；用户切换后写入 localStorage，下次打开沿用。
   const [chainKey, setChainKey] = useState<string>(() => loadDefaultChainKey())
   const [overviews, setOverviews] = useState<Record<string, AaOverview>>({})
+  const [btcBalances, setBtcBalances] = useState<Record<number, BitcoinBalance>>({})
   const [assetSymbol, setAssetSymbol] = useState('USDC')
   const [selectedId, setSelectedId] = useState<number | null>(null)
+  const [bookMode, setBookMode] = useState<'manage' | 'pick' | null>(null)
   const [transfer, setTransfer] = useState<TransferState>(EMPTY_TRANSFER)
   const [reveal, setReveal] = useState<{ address: string; privateKey: Hex } | null>(null)
   const [importKey, setImportKey] = useState('')
@@ -115,6 +123,7 @@ export default function App() {
   )
   const selected = activeWallets.find((w) => w.id === selectedId) || activeWallets[0] || null
   // 链只从注册表按 key 取；普通转账链（BSC / Ethereum）与 AA 链分开。
+  const bitcoinMode = chainKey === BITCOIN.key
   const chain = getChain(chainKey) ?? BSC
   const aaChain: AaChainConfig | null = isAaChain(chain) ? chain : null
   const nativeTransfer = Boolean(aaChain && isNativeAssetSymbol(aaChain, assetSymbol))
@@ -132,10 +141,11 @@ export default function App() {
   const changeChain = (key: string) => {
     const saved = saveDefaultChainKey(key)
     setChainKey(saved)
-    const next = getChain(saved)
-    setNotice(
-      `默认链已保存：${next?.name ?? saved}${next && isAaChain(next) ? ' · AA' : ''}；下次打开直接进入`,
-    )
+    const next = getKnownChain(saved)
+    const isBtc = next?.key === BITCOIN.key
+    if (isBtc) setBookMode(null)
+    const suffix = isBtc ? ' · BTC' : next && !isBitcoinChain(next) && isAaChain(next) ? ' · AA' : ''
+    setNotice(`默认链已保存：${next?.name ?? saved}${suffix}；下次打开直接进入`)
   }
 
   const resetSecretState = () => {
@@ -147,6 +157,8 @@ export default function App() {
   }
 
   const lock = () => {
+    addressBookService.lock()
+    setBookMode(null)
     if (opened) closeVault(opened)
     setOpened(null)
     resetSecretState()
@@ -270,6 +282,23 @@ export default function App() {
   const refreshBalances = async (vault: OpenedVault | null = opened) => {
     if (!vault) return
     const active = vault.wallets.filter((w) => w.status !== 'deleted')
+    if (bitcoinMode) {
+      const next: Record<number, BitcoinBalance> = {}
+      // 公共 Esplora 有速率限制；每批 3 个地址，避免一次打太多。
+      for (let index = 0; index < active.length; index += 3) {
+        await Promise.all(
+          active.slice(index, index + 3).map(async (wallet) => {
+            try {
+              next[wallet.id] = await fetchBitcoinBalance(wallet.privateKey)
+            } catch {
+              /* 单个地址失败保留 — */
+            }
+          }),
+        )
+      }
+      setBtcBalances(next)
+      return
+    }
     if (!aaChain) {
       const next: Record<string, string> = {}
       await Promise.all(
@@ -301,6 +330,10 @@ export default function App() {
   useEffect(() => {
     // 切换链后旧表单/资产不能沿用；余额按新链重新读。
     setTransfer(EMPTY_TRANSFER)
+    if (bitcoinMode) {
+      if (opened) void refreshBalances(opened)
+      return
+    }
     const next = getChain(chainKey) ?? BSC
     if (isAaChain(next)) {
       const valid =
@@ -603,9 +636,18 @@ export default function App() {
         <div>
           <h1>本地钱包</h1>
           <p className="muted">
-            {activeWallets.length} 个钱包 · {chain.name}
-            {aaChain ? ' · AA' : ''} · 已解锁
-            {aaChain && selectedOverview ? (
+            {activeWallets.length} 个钱包 · {bitcoinMode ? 'Bitcoin · BTC' : chain.name}
+            {!bitcoinMode && aaChain ? ' · AA' : ''} · 已解锁
+            {bitcoinMode ? (
+              selected ? (
+                <>
+                  <br />
+                  {btcBalances[selected.id]
+                    ? `${formatUnits(btcBalances[selected.id].total, 8)} BTC`
+                    : '— BTC'}
+                </>
+              ) : null
+            ) : aaChain && selectedOverview ? (
               <>
                 <br />
                 {selectedOverview.assets.map((item) => `${item.balance} ${item.symbol}`).join(' · ')}
@@ -637,15 +679,16 @@ export default function App() {
           onChange={(e) => changeChain(e.target.value)}
           aria-label="选择链"
         >
-          {CHAINS.map((c) => (
+          {ALL_CHAINS.map((c) => (
             <option key={c.key} value={c.key}>
-              {c.name}
-              {isAaChain(c) ? ' · AA' : ' · 普通转账'}
+              {isBitcoinChain(c)
+                ? `${c.name} · 原生 BTC`
+                : `${c.name}${isAaChain(c) ? ' · AA' : ' · 普通转账'}`}
             </option>
           ))}
         </select>
         <span className="small muted">
-          默认链：{chain.name}{aaChain ? ' · AA' : ''}（已保存在本机）
+          默认链：{bitcoinMode ? 'Bitcoin · 原生 BTC' : `${chain.name}${aaChain ? ' · AA' : ''}`}（已保存在本机）
         </span>
         {chainKey !== DEFAULT_CHAIN_KEY ? (
           <button className="ghost" onClick={() => changeChain(DEFAULT_CHAIN_KEY)}>
@@ -657,10 +700,24 @@ export default function App() {
       {notice ? <div className="notice">{notice}</div> : null}
       {error ? <div className="error">{error}</div> : null}
 
+      {bitcoinMode ? (
+        <BitcoinWorkspace
+          wallets={activeWallets}
+          balances={btcBalances}
+          selectedId={selected?.id ?? null}
+          onSelect={setSelectedId}
+          onRefresh={() => void refreshBalances()}
+          onNotice={setNotice}
+        />
+      ) : (
+        <>
       <section className="card">
         <div className="row space">
           <h2>钱包列表</h2>
           <div className="row">
+            <button className="ghost" onClick={() => setBookMode('manage')} disabled={Boolean(busy)}>
+              地址簿
+            </button>
             <button className="ghost" onClick={() => void addNew()} disabled={Boolean(busy)}>
               生成新钱包
             </button>
@@ -809,12 +866,17 @@ export default function App() {
               <h2>转账 · {chain.name}（{chain.native.symbol}）</h2>
               <span className="small muted">#{selected.id} {short(selected.address)}</span>
             </div>
-            <input
-              value={transfer.to}
-              onChange={(e) => setTransfer((s) => ({ ...s, to: e.target.value }))}
-              placeholder="收款地址 0x…"
-              spellCheck={false}
-            />
+            <div className="row bookPick">
+              <input
+                value={transfer.to}
+                onChange={(e) => setTransfer((s) => ({ ...s, to: e.target.value }))}
+                placeholder="收款地址 0x…"
+                spellCheck={false}
+              />
+              <button className="ghost" onClick={() => setBookMode('pick')}>
+                地址簿
+              </button>
+            </div>
             <div className="row">
               <input
                 value={transfer.amount}
@@ -881,12 +943,17 @@ export default function App() {
                 selectedOverview?.delegation.implementation,
               )}
             </p>
-            <input
-              value={transfer.to}
-              onChange={(e) => setTransfer((s) => ({ ...s, to: e.target.value }))}
-              placeholder="收款地址 0x…"
-              spellCheck={false}
-            />
+            <div className="row bookPick">
+              <input
+                value={transfer.to}
+                onChange={(e) => setTransfer((s) => ({ ...s, to: e.target.value }))}
+                placeholder="收款地址 0x…"
+                spellCheck={false}
+              />
+              <button className="ghost" onClick={() => setBookMode('pick')}>
+                地址簿
+              </button>
+            </div>
             <input
               value={transfer.amount}
               onChange={(e) => setTransfer((s) => ({ ...s, amount: e.target.value }))}
@@ -933,6 +1000,27 @@ export default function App() {
             )}
           </section>
         </>
+      ) : null}
+        </>
+      )}
+
+      {bookMode && !bitcoinMode ? (
+        <AddressBookDialog
+          mode={bookMode}
+          onClose={() => setBookMode(null)}
+          onPick={
+            bookMode === 'pick'
+              ? (entry) => {
+                  setTransfer((state) => ({ ...state, to: entry.address }))
+                  setNotice(`已从地址簿选择：${entry.label || entry.address}`)
+                }
+              : undefined
+          }
+          onToast={(message, type) => {
+            if (type === 'error') setError(message)
+            else setNotice(message)
+          }}
+        />
       ) : null}
 
       <footer className="muted small">

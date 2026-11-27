@@ -56,3 +56,13 @@ footer { margin-top: 20px; text-align: center; }
 .batchStatus.unknown { color: #fbbf24; }
 .batchStatus.signing, .batchStatus.submitting, .batchStatus.waiting { color: #67e8f9; }
 .batchError { color: #fca5a5; margin-top: 2px; }
+.bookBackdrop { position: fixed; inset: 0; z-index: 40; background: #020617dd; padding: 16px; overflow-y: auto; }
+.bookCard { max-width: 620px; margin: 28px auto; border: 1px solid #1e293b; background: #070d17; border-radius: 18px; padding: 16px; }
+.bookList { display: flex; flex-direction: column; gap: 6px; max-height: 42vh; overflow-y: auto; margin: 8px 0; }
+.bookRow { border: 1px solid #162033; background: #02061780; border-radius: 12px; padding: 8px 10px; }
+.bookAddress { display: block; width: 100%; text-align: left; background: transparent; border: 0; color: #67e8f9; padding: 2px 0; }
+.bookForm { border: 1px solid #1e293b; border-radius: 12px; padding: 10px; margin: 8px 0; }
+.bookPick input { flex: 1; min-width: 0; }
+.bookCard > .row.space:first-child { flex-wrap: nowrap; align-items: flex-start; }
+.bookCard > .row.space:first-child > div { flex: 1; min-width: 0; }
+.bookCard > .row.space:first-child > button { flex-shrink: 0; }

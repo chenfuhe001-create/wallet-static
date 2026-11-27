@@ -274,6 +274,40 @@ export const AA_CHAINS: AaChainConfig[] = [
 
 export const CHAINS: ChainConfig[] = [BSC, ETHEREUM_NATIVE, ...AA_CHAINS]
 
+/** 比特币主网：与 EVM 类型分开，避免 EVM 代码误用 rpc/chainId。 */
+export interface BitcoinChainConfig {
+  key: 'bitcoin'
+  family: 'bitcoin'
+  name: string
+  short: string
+  native: NativeAsset
+  explorerTx: string
+  api: string[]
+}
+
+export const BITCOIN: BitcoinChainConfig = {
+  key: 'bitcoin',
+  family: 'bitcoin',
+  name: 'Bitcoin',
+  short: 'BTC',
+  native: { symbol: 'BTC', name: 'Bitcoin', decimals: 8 },
+  explorerTx: 'https://blockstream.info/tx/',
+  api: ['https://blockstream.info/api', 'https://mempool.space/api'],
+}
+
+export type AnyChain = ChainConfig | BitcoinChainConfig
+
+export const ALL_CHAINS: AnyChain[] = [...CHAINS, BITCOIN]
+
+export function isBitcoinChain(chain: AnyChain): chain is BitcoinChainConfig {
+  return 'family' in chain && chain.family === 'bitcoin'
+}
+
+/** 选择器/默认链用：EVM 链或 Bitcoin。 */
+export function getKnownChain(key: string): AnyChain | undefined {
+  return ALL_CHAINS.find((chain) => chain.key === key)
+}
+
 export function isAaChain(chain: ChainConfig): chain is AaChainConfig {
   return 'aa' in chain && chain.aa === true
 }

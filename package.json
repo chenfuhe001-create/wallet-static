@@ -12,6 +12,8 @@
     "fix:sodium": "node scripts/fix-sodium.mjs"
   },
   "dependencies": {
+    "@noble/curves": "^2.4.0",
+    "@scure/btc-signer": "^2.4.1",
     "libsodium-wrappers-sumo": "^0.7.15",
     "qrcode.react": "^4.2.0",
     "react": "^18.3.1",

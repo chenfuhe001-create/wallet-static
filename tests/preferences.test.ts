@@ -31,6 +31,7 @@ describe('本地默认链配置', () => {
     expect(normalizeDefaultChainKey('bsc')).toBe('bsc')
     expect(normalizeDefaultChainKey('optimism')).toBe('optimism')
     expect(normalizeDefaultChainKey('ethereum-native')).toBe('ethereum-native')
+    expect(normalizeDefaultChainKey('bitcoin')).toBe('bitcoin')
   })
 
   it('读取和保存都落在本机存储', () => {

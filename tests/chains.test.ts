@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest'
 import { isAddress } from 'viem'
 import {
   AA_CHAINS,
+  ALL_CHAINS,
   BSC,
+  BITCOIN,
   CHAINS,
   ETHEREUM,
   ETHEREUM_NATIVE,
@@ -11,6 +13,7 @@ import {
   getAaChain,
   getAsset,
   getChain,
+  getKnownChain,
   isNativeAssetSymbol,
 } from '../src/chains'
 
@@ -92,6 +95,16 @@ describe('多链注册表', () => {
     expect(() => getAaChain('bsc')).toThrow('普通转账')
     expect(() => getAaChain('ethereum-native')).toThrow('普通转账')
     expect(() => getAaChain('unknown-chain')).toThrow('不支持')
+  })
+
+  it('Bitcoin 是独立链类型，默认链校验也能识别', () => {
+    expect(BITCOIN.family).toBe('bitcoin')
+    expect(BITCOIN.native.symbol).toBe('BTC')
+    expect(BITCOIN.native.decimals).toBe(8)
+    expect(ALL_CHAINS.some((chain) => chain.key === 'bitcoin')).toBe(true)
+    expect(getKnownChain('bitcoin')).toBe(BITCOIN)
+    expect(getKnownChain('ethereum')).toBe(ETHEREUM)
+    expect(getKnownChain('nope')).toBeUndefined()
   })
 
   it('原生币标识按链取符号，覆盖所有链', () => {

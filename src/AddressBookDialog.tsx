@@ -1,5 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { addressBookService } from './addressBook/client'
+import {
+  ADDRESS_BOOK_FINGERPRINT_SCOPE,
+  clearFingerprint,
+  enableFingerprint,
+  hasFingerprint,
+  isWebAuthnSupported,
+  unlockWithFingerprint,
+} from './crypto/fingerprint'
 import type { AddressBookEntry } from './addressBook/types'
 
 interface Props {
@@ -39,6 +47,10 @@ export default function AddressBookDialog({ mode = 'manage', onClose, onPick, on
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [importing, setImporting] = useState(false)
+  const [fingerprintReady, setFingerprintReady] = useState(() =>
+    hasFingerprint(ADDRESS_BOOK_FINGERPRINT_SCOPE),
+  )
+  const [webAuthnSupported] = useState(() => isWebAuthnSupported())
   const fileRef = useRef<HTMLInputElement>(null)
 
   const toast = (message: string, type: 'success' | 'error' = 'success') => {
@@ -93,6 +105,8 @@ export default function AddressBookDialog({ mode = 'manage', onClose, onPick, on
       setLabel('')
       setNote('')
       setInitialized(true)
+      clearFingerprint(ADDRESS_BOOK_FINGERPRINT_SCOPE)
+      setFingerprintReady(false)
       toast('地址本已创建')
     } catch (err) {
       setError(err instanceof Error ? err.message : '创建地址本失败')
@@ -118,6 +132,47 @@ export default function AddressBookDialog({ mode = 'manage', onClose, onPick, on
     } finally {
       setBusy(false)
     }
+  }
+
+  const unlockByFingerprint = async () => {
+    setError('')
+    setBusy(true)
+    try {
+      const secret = await unlockWithFingerprint(ADDRESS_BOOK_FINGERPRINT_SCOPE)
+      const rows = await addressBookService.unlock(secret)
+      setPassword(secret)
+      setEntries(rows)
+      setCount(rows.length)
+      setConfirmPassword('')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '指纹解锁地址簿失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const enableBookFingerprint = async () => {
+    setError('')
+    if (!password) {
+      setError('请先用密码解锁地址簿，再启用指纹')
+      return
+    }
+    setBusy(true)
+    try {
+      await enableFingerprint(password, ADDRESS_BOOK_FINGERPRINT_SCOPE)
+      setFingerprintReady(true)
+      toast('地址簿指纹已启用（与钱包指纹分开保存）')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '启用地址簿指纹失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const disableBookFingerprint = () => {
+    clearFingerprint(ADDRESS_BOOK_FINGERPRINT_SCOPE)
+    setFingerprintReady(false)
+    toast('已停用地址簿指纹；密码解锁仍可用')
   }
 
   const saveEntry = async () => {
@@ -209,6 +264,8 @@ export default function AddressBookDialog({ mode = 'manage', onClose, onPick, on
       setLabel('')
       setNote('')
       setEditingId(null)
+      clearFingerprint(ADDRESS_BOOK_FINGERPRINT_SCOPE)
+      setFingerprintReady(false)
       toast(`已恢复 ${result.restored} 条地址${result.backup ? '，旧地址簿已本地备份' : ''}`)
     } catch (err) {
       setError(err instanceof Error ? err.message : '导入失败')
@@ -299,6 +356,11 @@ export default function AddressBookDialog({ mode = 'manage', onClose, onPick, on
               <button className="ghost" onClick={() => fileRef.current?.click()} disabled={importing}>
                 {importing ? '导入中…' : '导入密文'}
               </button>
+              {webAuthnSupported && fingerprintReady ? (
+                <button className="primary" onClick={() => void unlockByFingerprint()} disabled={busy}>
+                  用指纹解锁地址簿
+                </button>
+              ) : null}
             </div>
           ) : (
             <div>
@@ -430,6 +492,23 @@ export default function AddressBookDialog({ mode = 'manage', onClose, onPick, on
               <button className="ghost" onClick={() => fileRef.current?.click()} disabled={importing}>
                 {importing ? '导入中…' : '导入密文'}
               </button>
+              {webAuthnSupported ? (
+                fingerprintReady ? (
+                  <button className="ghost" onClick={disableBookFingerprint} disabled={busy}>
+                    停用地址簿指纹
+                  </button>
+                ) : (
+                  <button
+                    className="ghost"
+                    onClick={() => void enableBookFingerprint()}
+                    disabled={busy || !password}
+                  >
+                    启用地址簿指纹
+                  </button>
+                )
+              ) : (
+                <span className="small muted">当前环境不支持 WebAuthn/指纹</span>
+              )}
               <span className="small muted">导出文件不含明文地址，恢复时需要地址本密码</span>
             </div>
           </div>

@@ -24,7 +24,14 @@ import {
   isWebAuthnSupported,
   unlockWithFingerprint,
 } from './crypto/fingerprint'
-import { estimateNativeTransfer, getNativeBalance, sendNative } from './evm/native'
+import {
+  estimateErc20Transfer,
+  estimateNativeTransfer,
+  getErc20Balance,
+  getNativeBalance,
+  sendErc20,
+  sendNative,
+} from './evm/native'
 import BatchPanel from './BatchPanel'
 import AddressBookDialog from './AddressBookDialog'
 import { addressBookService } from './addressBook/client'
@@ -83,6 +90,7 @@ export default function App() {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [balances, setBalances] = useState<Record<string, string>>({})
+  const [evmTokenBalances, setEvmTokenBalances] = useState<Record<string, string>>({})
   // 默认以太坊 AA；用户切换后写入 localStorage，下次打开沿用。
   const [chainKey, setChainKey] = useState<string>(() => loadDefaultChainKey())
   const [overviews, setOverviews] = useState<Record<string, AaOverview>>({})
@@ -130,11 +138,15 @@ export default function App() {
   const asset = aaChain && !nativeTransfer
     ? aaChain.assets.find((a) => a.symbol === assetSymbol) ?? null
     : null
+  const evmTokens = !aaChain ? (chain.tokens ?? []) : []
+  const evmToken = !aaChain
+    ? evmTokens.find((item) => item.symbol === assetSymbol) ?? null
+    : null
   const transferSymbol = aaChain
     ? nativeTransfer
       ? aaChain.native.symbol
       : asset?.symbol ?? aaChain.feeToken.symbol
-    : chain.native.symbol
+    : evmToken?.symbol ?? chain.native.symbol
   const selectedOverview =
     aaChain && selected ? overviews[`${chain.key}:${selected.address}`] : undefined
 
@@ -301,6 +313,7 @@ export default function App() {
     }
     if (!aaChain) {
       const next: Record<string, string> = {}
+      const nextTokens: Record<string, string> = {}
       await Promise.all(
         active.map(async (w) => {
           try {
@@ -309,9 +322,18 @@ export default function App() {
           } catch {
             next[w.address] = '读取失败'
           }
+          for (const token of chain.tokens ?? []) {
+            const key = `${chain.key}:${w.address}:${token.symbol}`
+            try {
+              nextTokens[key] = (await getErc20Balance(chain, token, w.address)).amount
+            } catch {
+              nextTokens[key] = '读取失败'
+            }
+          }
         }),
       )
       setBalances((old) => ({ ...old, ...next }))
+      setEvmTokenBalances((old) => ({ ...old, ...nextTokens }))
       return
     }
     const next: Record<string, AaOverview> = {}
@@ -428,16 +450,24 @@ export default function App() {
     if (!selected) return
     setTransfer((s) => ({ ...s, busy: true, error: '', result: '' }))
     try {
-      const est = await estimateNativeTransfer(chain, {
-        from: selected.address,
-        to: transfer.to,
-        amount: transfer.amount,
-        gasPriceGwei: transfer.gasPrice,
-      })
+      const est = evmToken
+        ? await estimateErc20Transfer(chain, {
+            from: selected.address,
+            to: transfer.to,
+            token: evmToken,
+            amount: transfer.amount,
+            gasPriceGwei: transfer.gasPrice,
+          })
+        : await estimateNativeTransfer(chain, {
+            from: selected.address,
+            to: transfer.to,
+            amount: transfer.amount,
+            gasPriceGwei: transfer.gasPrice,
+          })
       setTransfer((s) => ({
         ...s,
         busy: false,
-        result: `预估 gas ${est.gasLimit} × ${est.gasPrice} wei ≈ ${est.fee} ${chain.native.symbol}`,
+        result: `预估 gas ${est.gasLimit} × ${est.gasPrice} wei ≈ ${est.fee} ${chain.native.symbol}（转出 ${transferSymbol}）`,
       }))
     } catch (e) {
       setTransfer((s) => ({ ...s, busy: false, error: e instanceof Error ? e.message : '预估失败' }))
@@ -446,9 +476,11 @@ export default function App() {
 
   const send = async () => {
     if (!selected) return
+    const symbol = evmToken?.symbol ?? chain.native.symbol
     if (
       !window.confirm(
-        `确认从 ${selected.address} 在 ${chain.name} 转出 ${transfer.amount} ${chain.native.symbol} 到 ${transfer.to}？\n\n` +
+        `确认从 ${selected.address} 在 ${chain.name} 转出 ${transfer.amount} ${symbol} 到 ${transfer.to}？\n\n` +
+          (evmToken ? '代币金额从代币余额扣除，gas 用 BNB。' : '') +
           '交易将在本地签名后直接广播，不可撤销。',
       )
     ) {
@@ -456,16 +488,24 @@ export default function App() {
     }
     setTransfer((s) => ({ ...s, busy: true, error: '', result: '' }))
     try {
-      const res = await sendNative(chain, {
-        privateKey: selected.privateKey,
-        to: transfer.to,
-        amount: transfer.amount,
-        gasPriceGwei: transfer.gasPrice,
-      })
+      const res = evmToken
+        ? await sendErc20(chain, {
+            privateKey: selected.privateKey,
+            to: transfer.to,
+            token: evmToken,
+            amount: transfer.amount,
+            gasPriceGwei: transfer.gasPrice,
+          })
+        : await sendNative(chain, {
+            privateKey: selected.privateKey,
+            to: transfer.to,
+            amount: transfer.amount,
+            gasPriceGwei: transfer.gasPrice,
+          })
       setTransfer((s) => ({
         ...s,
         busy: false,
-        result: `已广播：${res.hash}\n手续费：${res.fee} ${chain.native.symbol}`,
+        result: `已广播：${res.hash}\n转出：${res.amount} ${symbol}\n手续费：${res.fee} ${chain.native.symbol}`,
       }))
       setNotice('交易已广播；请用区块浏览器核对')
       void refreshBalances()
@@ -658,6 +698,10 @@ export default function App() {
               <>
                 <br />
                 {balances[selected.address] ?? '—'} {chain.native.symbol}
+                {evmTokens.map((token) => {
+                  const key = `${chain.key}:${selected.address}:${token.symbol}`
+                  return ` · ${evmTokenBalances[key] ?? '—'} ${token.symbol}`
+                })}
               </>
             ) : null}
           </p>
@@ -759,8 +803,16 @@ export default function App() {
                       </div>
                     </div>
                   ) : (
-                    <div className="mono">
-                      {balances[w.address] ?? '—'} {chain.native.symbol}
+                    <div className="walletBalances mono">
+                      <div>
+                        {balances[w.address] ?? '—'} {chain.native.symbol}
+                      </div>
+                      {evmTokens.map((token) => (
+                        <div key={token.symbol}>
+                          {evmTokenBalances[`${chain.key}:${w.address}:${token.symbol}`] ?? '—'}{' '}
+                          {token.symbol}
+                        </div>
+                      ))}
                     </div>
                   )}
                   <div className="small muted">
@@ -863,9 +915,37 @@ export default function App() {
           {!aaChain ? (
           <section className="card">
             <div className="row space">
-              <h2>转账 · {chain.name}（{chain.native.symbol}）</h2>
+              <h2>转账 · {chain.name}（{transferSymbol}）</h2>
               <span className="small muted">#{selected.id} {short(selected.address)}</span>
             </div>
+            {evmTokens.length ? (
+              <>
+                <label className="small muted" htmlFor="evmAsset">转账币种</label>
+                <select
+                  id="evmAsset"
+                  className="select"
+                  value={evmToken?.symbol ?? chain.native.symbol}
+                  onChange={(e) => setAssetSymbol(e.target.value)}
+                  disabled={transfer.busy}
+                >
+                  <option value={chain.native.symbol}>{chain.native.symbol}（原生币）</option>
+                  {evmTokens.map((token) => (
+                    <option key={token.symbol} value={token.symbol}>
+                      {token.symbol}
+                      {token.symbol === 'BTCB' ? '（BSC 上的 BTC）' : ''}
+                    </option>
+                  ))}
+                </select>
+              </>
+            ) : null}
+            <p className="small muted">
+              {balances[selected.address] ?? '—'} {chain.native.symbol}
+              {evmTokens.map((token) => {
+                const key = `${chain.key}:${selected.address}:${token.symbol}`
+                return ` · ${evmTokenBalances[key] ?? '—'} ${token.symbol}`
+              })}
+              {evmToken ? ' · 代币转账 gas 用 BNB' : ''}
+            </p>
             <div className="row bookPick">
               <input
                 value={transfer.to}
@@ -881,7 +961,7 @@ export default function App() {
               <input
                 value={transfer.amount}
                 onChange={(e) => setTransfer((s) => ({ ...s, amount: e.target.value }))}
-                placeholder={`金额（${chain.native.symbol}）`}
+                placeholder={`金额（${transferSymbol}）`}
                 inputMode="decimal"
               />
               <input

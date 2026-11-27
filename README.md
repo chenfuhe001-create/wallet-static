@@ -30,7 +30,15 @@
 - 支持创建、搜索、添加、编辑、删除、导出密文、导入密文；导入覆盖非空地址簿前会本地备份旧密文。
 - web 导出的地址簿可直接导入本地；本地导出的 EVM 地址簿可被 web 导入。
 - 地址簿只存 EVM 地址；比特币转账请手动填写 BTC 地址（格式兼容优先）。
+- 地址簿可单独启用 WebAuthn PRF 指纹：独立 localStorage key、独立凭据与 HKDF info，和钱包指纹互不影响；创建/导入后旧指纹自动清除。
 - 密码丢失只能靠导出的密文 + 密码恢复，没有找回入口。
+
+## BSC 的 BTCB
+
+- BSC 本身没有原生 BTC；BSC 上的 BTC 是 **BTCB（BEP-20 锚定币）**，合约 `0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c`，18 位小数。
+- BSC 转账区新增「转账币种」下拉：BNB（原生）或 BTCB；BTCB 金额从代币余额扣，gas 仍用 BNB。
+- 批量转账也按当前币种选择走 BNB 或 BTCB，已上链失败不会自动重发。
+- 需要原生 Bitcoin 主网 BTC 请切到 Bitcoin 链，不要在 BSC 上找原生 BTC。
 
 ## 原生比特币（主网）
 
@@ -90,6 +98,8 @@ npm run build
 - [x] 转账区资产下拉；各链原生币（ETH/BNB/POL/AVAX）AA 转账支持
 - [x] 本地 EVM 地址簿（与 web 密文格式互导）+ 转账选择
 - [x] 原生比特币主网 P2WPKH 单笔转账（Blockstream/mempool.space）
+- [x] BSC BTCB（BEP-20）单笔/批量转账，gas 用 BNB
+- [x] 地址簿独立 WebAuthn PRF 指纹解锁
 - [ ] 批量真实 canary（BSC 0.001 BNB ×3 / OP 0.01 USDC ×2，待用户批准）
 - [x] 本地指纹（WebAuthn PRF）：PRF → HKDF → AES-GCM 包装密码，改密/导入/清除后失效
 - [ ] 本地地址本（未列入本期）

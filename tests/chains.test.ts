@@ -4,6 +4,7 @@ import {
   AA_CHAINS,
   ALL_CHAINS,
   BSC,
+  BSC_BTCB,
   BITCOIN,
   CHAINS,
   ETHEREUM,
@@ -95,6 +96,13 @@ describe('多链注册表', () => {
     expect(() => getAaChain('bsc')).toThrow('普通转账')
     expect(() => getAaChain('ethereum-native')).toThrow('普通转账')
     expect(() => getAaChain('unknown-chain')).toThrow('不支持')
+  })
+
+  it('BSC 的 BTCB 锚定币来自注册表', () => {
+    expect(BSC.tokens?.map((token) => token.symbol)).toEqual(['BTCB'])
+    expect(BSC_BTCB.address).toBe('0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c')
+    expect(BSC_BTCB.decimals).toBe(18)
+    expect(BSC.native.symbol).toBe('BNB')
   })
 
   it('Bitcoin 是独立链类型，默认链校验也能识别', () => {

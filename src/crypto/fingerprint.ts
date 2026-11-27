@@ -6,9 +6,34 @@
  * 不是零知识——XSS/恶意扩展仍可能在解锁瞬间截获密码，页面保持严格 CSP。
  */
 
-const STORAGE_KEY = 'wallet-static-fingerprint-v1'
-const INFO = 'wallet-static-fingerprint-v1'
 const VERSION = 1
+
+export interface FingerprintScope {
+  /** localStorage key：钱包与地址簿必须各用一份，互不影响。 */
+  storageKey: string
+  /** HKDF info：不同用途用不同 info。 */
+  info: string
+  rpName: string
+  userName: string
+  /** 错误文案里的名称，如“钱包”“地址簿”。 */
+  label: string
+}
+
+export const WALLET_FINGERPRINT_SCOPE: FingerprintScope = {
+  storageKey: 'wallet-static-fingerprint-v1',
+  info: 'wallet-static-fingerprint-v1',
+  rpName: '本地钱包 wallet-static',
+  userName: 'wallet',
+  label: '钱包',
+}
+
+export const ADDRESS_BOOK_FINGERPRINT_SCOPE: FingerprintScope = {
+  storageKey: 'wallet-static-address-book-fingerprint-v1',
+  info: 'wallet-static-address-book-fingerprint-v1',
+  rpName: '本地钱包 wallet-static · 地址簿',
+  userName: 'address-book',
+  label: '地址簿',
+}
 
 export interface FingerprintBlob {
   version: number
@@ -48,10 +73,11 @@ export function fromBase64Url(value: string): Uint8Array {
 export async function deriveFingerprintKey(
   prfOutput: Uint8Array,
   salt: Uint8Array,
+  info = WALLET_FINGERPRINT_SCOPE.info,
 ): Promise<CryptoKey> {
   const base = await crypto.subtle.importKey('raw', prfOutput, 'HKDF', false, ['deriveBits'])
   const bits = await crypto.subtle.deriveBits(
-    { name: 'HKDF', hash: 'SHA-256', salt, info: new TextEncoder().encode(INFO) },
+    { name: 'HKDF', hash: 'SHA-256', salt, info: new TextEncoder().encode(info) },
     base,
     256,
   )
@@ -62,8 +88,9 @@ export async function wrapPassword(
   prfOutput: Uint8Array,
   salt: Uint8Array,
   password: string,
+  info = WALLET_FINGERPRINT_SCOPE.info,
 ): Promise<WrappedPassword> {
-  const key = await deriveFingerprintKey(prfOutput, salt)
+  const key = await deriveFingerprintKey(prfOutput, salt, info)
   const iv = randomBytes(12)
   const ciphertext = new Uint8Array(
     await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(password)),
@@ -75,9 +102,10 @@ export async function unwrapPassword(
   prfOutput: Uint8Array,
   salt: Uint8Array,
   wrapped: WrappedPassword,
+  info = WALLET_FINGERPRINT_SCOPE.info,
 ): Promise<string> {
   try {
-    const key = await deriveFingerprintKey(prfOutput, salt)
+    const key = await deriveFingerprintKey(prfOutput, salt, info)
     const plaintext = await crypto.subtle.decrypt(
       { name: 'AES-GCM', iv: fromBase64Url(wrapped.iv) },
       key,
@@ -107,8 +135,8 @@ function isBlob(value: unknown): value is FingerprintBlob {
   )
 }
 
-export function loadFingerprint(): FingerprintBlob | null {
-  const raw = storage()?.getItem(STORAGE_KEY)
+export function loadFingerprint(scope: FingerprintScope = WALLET_FINGERPRINT_SCOPE): FingerprintBlob | null {
+  const raw = storage()?.getItem(scope.storageKey)
   if (!raw) return null
   try {
     const parsed: unknown = JSON.parse(raw)
@@ -118,16 +146,19 @@ export function loadFingerprint(): FingerprintBlob | null {
   }
 }
 
-export function saveFingerprint(blob: FingerprintBlob): void {
-  storage()?.setItem(STORAGE_KEY, JSON.stringify(blob))
+export function saveFingerprint(
+  blob: FingerprintBlob,
+  scope: FingerprintScope = WALLET_FINGERPRINT_SCOPE,
+): void {
+  storage()?.setItem(scope.storageKey, JSON.stringify(blob))
 }
 
-export function clearFingerprint(): void {
-  storage()?.removeItem(STORAGE_KEY)
+export function clearFingerprint(scope: FingerprintScope = WALLET_FINGERPRINT_SCOPE): void {
+  storage()?.removeItem(scope.storageKey)
 }
 
-export function hasFingerprint(): boolean {
-  return loadFingerprint() !== null
+export function hasFingerprint(scope: FingerprintScope = WALLET_FINGERPRINT_SCOPE): boolean {
+  return loadFingerprint(scope) !== null
 }
 
 /** 非安全上下文（非 HTTPS/localhost）或缺少 WebAuthn 时不可用。 */
@@ -155,8 +186,11 @@ function rpId(): string {
 }
 
 /** 创建 passkey 并用 PRF 包装密码；浏览器不支持 PRF 时抛错（凭据无法删除，只能停用）。 */
-export async function enableFingerprint(password: string): Promise<FingerprintBlob> {
-  if (!password) throw new Error('请输入当前钱包密码')
+export async function enableFingerprint(
+  password: string,
+  scope: FingerprintScope = WALLET_FINGERPRINT_SCOPE,
+): Promise<FingerprintBlob> {
+  if (!password) throw new Error(`请输入当前${scope.label}密码`)
   if (!isWebAuthnSupported()) {
     throw new Error('当前环境不支持 WebAuthn/指纹（需要 HTTPS 或 localhost）')
   }
@@ -164,8 +198,8 @@ export async function enableFingerprint(password: string): Promise<FingerprintBl
   const credential = (await navigator.credentials.create({
     publicKey: {
       challenge: randomBytes(32),
-      rp: { id: rpId(), name: '本地钱包 wallet-static' },
-      user: { id: randomBytes(16), name: `wallet-${Date.now()}`, displayName: '本地钱包' },
+      rp: { id: rpId(), name: scope.rpName },
+      user: { id: randomBytes(16), name: `${scope.userName}-${Date.now()}`, displayName: scope.rpName },
       pubKeyCredParams: [
         { type: 'public-key', alg: -7 },
         { type: 'public-key', alg: -257 },
@@ -182,7 +216,7 @@ export async function enableFingerprint(password: string): Promise<FingerprintBl
     throw new Error('该浏览器/设备不支持 PRF，指纹解锁不可用；请继续用密码')
   }
 
-  const wrapped = await wrapPassword(new Uint8Array(first), salt, password)
+  const wrapped = await wrapPassword(new Uint8Array(first), salt, password, scope.info)
   const blob: FingerprintBlob = {
     version: VERSION,
     credentialId: toBase64Url(new Uint8Array(credential.rawId)),
@@ -192,17 +226,19 @@ export async function enableFingerprint(password: string): Promise<FingerprintBl
     rpId: rpId(),
     createdAt: Date.now(),
   }
-  saveFingerprint(blob)
+  saveFingerprint(blob, scope)
   return blob
 }
 
 /** 用指纹解出钱包密码；随后仍走本地 Argon2 保险箱解锁。 */
-export async function unlockWithFingerprint(): Promise<string> {
-  const blob = loadFingerprint()
-  if (!blob) throw new Error('本机未启用指纹解锁')
+export async function unlockWithFingerprint(
+  scope: FingerprintScope = WALLET_FINGERPRINT_SCOPE,
+): Promise<string> {
+  const blob = loadFingerprint(scope)
+  if (!blob) throw new Error(`本机未启用${scope.label}指纹解锁`)
   if (!isWebAuthnSupported()) throw new Error('当前环境不支持 WebAuthn/指纹')
   if (blob.rpId !== rpId()) {
-    throw new Error('指纹凭据与当前域名不匹配，请用钱包密码解锁')
+    throw new Error(`指纹凭据与当前域名不匹配，请用${scope.label}密码解锁`)
   }
   const salt = fromBase64Url(blob.salt)
   const assertion = (await navigator.credentials.get({
@@ -217,9 +253,11 @@ export async function unlockWithFingerprint(): Promise<string> {
   })) as PublicKeyCredential | null
   if (!assertion) throw new Error('已取消指纹验证')
   const first = prfFirst(assertion)
-  if (!first) throw new Error('指纹 PRF 不可用，请用钱包密码解锁')
-  return unwrapPassword(new Uint8Array(first), salt, {
-    iv: blob.iv,
-    ciphertext: blob.ciphertext,
-  })
+  if (!first) throw new Error(`指纹 PRF 不可用，请用${scope.label}密码解锁`)
+  return unwrapPassword(
+    new Uint8Array(first),
+    salt,
+    { iv: blob.iv, ciphertext: blob.ciphertext },
+    scope.info,
+  )
 }

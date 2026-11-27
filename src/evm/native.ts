@@ -3,10 +3,10 @@
  * 与 Circle AA 路径完全分离：不使用 7702 / Paymaster / USDC gas。
  */
 
-import { formatEther, isAddress, keccak256, parseEther, parseGwei } from 'viem'
+import { concat, encodeAbiParameters, formatEther, formatUnits, isAddress, keccak256, parseEther, parseGwei, parseUnits } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import type { Hex } from 'viem'
-import type { ChainConfig } from '../chains'
+import type { ChainConfig, TokenAsset } from '../chains'
 import {
   AmbiguousBroadcastError,
   BroadcastError,
@@ -46,6 +46,205 @@ export interface NativeEstimate {
   gasLimit: bigint
   gasPrice: bigint
   fee: string
+}
+
+export interface TokenBalance {
+  raw: bigint
+  amount: string
+}
+
+const TRANSFER_SELECTOR = keccak256(
+  new TextEncoder().encode('transfer(address,uint256)'),
+).slice(0, 10) as Hex
+
+export function encodeErc20TransferData(to: string, amount: bigint): Hex {
+  return concat([
+    TRANSFER_SELECTOR,
+    encodeAbiParameters([{ type: 'address' }, { type: 'uint256' }], [to as Hex, amount]),
+  ])
+}
+
+export async function getErc20Balance(
+  chain: ChainConfig,
+  token: TokenAsset,
+  owner: string,
+): Promise<TokenBalance> {
+  if (!isAddress(owner)) throw new Error('地址格式不正确')
+  const data = concat([
+    '0x70a08231',
+    encodeAbiParameters([{ type: 'address' }], [owner as Hex]),
+  ])
+  const raw = hexToBigInt(
+    await rpcRead<string>(chain.rpc, 'eth_call', [{ to: token.address, data }, 'latest']),
+  )
+  return { raw, amount: formatUnits(raw, token.decimals) }
+}
+
+export async function estimateErc20Transfer(
+  chain: ChainConfig,
+  input: { from: string; to: string; token: TokenAsset; amount: string; gasPriceGwei?: string },
+): Promise<NativeEstimate> {
+  if (!isAddress(input.from) || !isAddress(input.to)) throw new Error('地址格式不正确')
+  const value = parseUnits(input.amount || '0', input.token.decimals)
+  if (value <= 0n) throw new Error('金额必须大于 0')
+  const data = encodeErc20TransferData(input.to, value)
+  const estimated = hexToBigInt(
+    await rpcRead<string>(chain.rpc, 'eth_estimateGas', [
+      { from: input.from, to: input.token.address, data },
+    ]),
+  )
+  const gasLimit = withBuffer(estimated)
+  const gasPrice = input.gasPriceGwei?.trim()
+    ? parseGwei(input.gasPriceGwei.trim())
+    : await getNativeGasPrice(chain)
+  return { gasLimit, gasPrice, fee: formatEther(gasLimit * gasPrice) }
+}
+
+/** BEP-20/ERC-20 转账：gas 用该链原生币，代币金额走 transfer。 */
+export async function sendErc20(
+  chain: ChainConfig,
+  input: {
+    privateKey: Hex
+    to: string
+    token: TokenAsset
+    amount: string
+    gasPriceGwei?: string
+  },
+): Promise<NativeSendResult> {
+  let broadcastStarted = false
+  try {
+    if (!isAddress(input.to)) throw new Error('收款地址格式不正确')
+    if (!isAddress(input.token.address)) throw new Error('代币合约地址不正确')
+    const value = parseUnits(input.amount || '0', input.token.decimals)
+    if (value <= 0n) throw new Error('金额必须大于 0')
+    const account = privateKeyToAccount(input.privateKey)
+    const from = account.address
+    const chainId = hexToBigInt(await rpcRead<string>(chain.rpc, 'eth_chainId', []))
+    if (chainId !== BigInt(chain.id)) {
+      throw new Error(`RPC 返回的 chainId=${chainId}，不是 ${chain.short}(${chain.id})`)
+    }
+
+    const data = encodeErc20TransferData(input.to, value)
+    const [nonceHex, gasPriceHex, estimateHex, nativeBalanceHex, tokenBalance] = await Promise.all([
+      rpcRead<string>(chain.rpc, 'eth_getTransactionCount', [from, 'pending']),
+      input.gasPriceGwei?.trim()
+        ? Promise.resolve(toHex(parseGwei(input.gasPriceGwei.trim())))
+        : rpcRead<string>(chain.rpc, 'eth_gasPrice', []),
+      rpcRead<string>(chain.rpc, 'eth_estimateGas', [
+        { from, to: input.token.address, data },
+      ]),
+      rpcRead<string>(chain.rpc, 'eth_getBalance', [from, 'latest']),
+      getErc20Balance(chain, input.token, from),
+    ])
+    const nonce = hexToBigInt(nonceHex)
+    const gasPrice = hexToBigInt(gasPriceHex)
+    const gas = withBuffer(hexToBigInt(estimateHex))
+    const nativeBalance = hexToBigInt(nativeBalanceHex)
+    if (tokenBalance.raw < value) throw new Error(`${input.token.symbol} 余额不足`)
+    if (nativeBalance < gas * gasPrice) {
+      throw new Error(`${chain.native.symbol} 余额不足以支付手续费`)
+    }
+
+    const signed = await account.signTransaction({
+      chainId: chain.id,
+      to: input.token.address as Hex,
+      value: 0n,
+      data,
+      gas,
+      gasPrice,
+      nonce: Number(nonce),
+    })
+    const txHash = keccak256(signed)
+    const toResult = (
+      receipt: NonNullable<Awaited<ReturnType<typeof waitForNativeReceipt>>>,
+      hash: Hex,
+    ): NativeSendResult => {
+      if (receipt.status === 'failed') {
+        throw new BroadcastError(`交易已上链但执行失败，代币未转出；哈希 ${hash}`, hash)
+      }
+      return {
+        status: 'success',
+        hash,
+        from,
+        to: input.to,
+        amount: input.amount,
+        gasUsed: receipt.gasUsed,
+        effectiveGasPrice: receipt.effectiveGasPrice,
+        fee: formatEther(receipt.gasUsed * receipt.effectiveGasPrice),
+      }
+    }
+
+    broadcastStarted = true
+    const delays = [4_000, 10_000, 18_000]
+    let hash: Hex | null = null
+    let lastError: unknown = null
+    for (let attempt = 0; attempt <= delays.length; attempt += 1) {
+      try {
+        hash = await rpcCall<Hex>(chain.rpc[0], 'eth_sendRawTransaction', [signed])
+        break
+      } catch (err) {
+        lastError = err
+        const receipt = await waitForNativeReceipt(chain, txHash, 8_000).catch(() => null)
+        if (receipt) return toResult(receipt, txHash)
+        const known = await rpcRead<{ hash?: Hex } | null>(
+          chain.rpc,
+          'eth_getTransactionByHash',
+          [txHash],
+        ).catch(() => null)
+        if (known) {
+          const pendingReceipt = await waitForNativeReceipt(chain, txHash, 120_000).catch(() => null)
+          if (pendingReceipt) return toResult(pendingReceipt, txHash)
+          return {
+            status: 'pending',
+            hash: txHash,
+            from,
+            to: input.to,
+            amount: input.amount,
+            gasUsed: 0n,
+            effectiveGasPrice: gasPrice,
+            fee: '待确认',
+          }
+        }
+        if (!isTransientNetworkError(err)) {
+          throw new PreBroadcastError(
+            `${chain.short} 发送被拒绝：${err instanceof Error ? err.message : String(err)}`,
+            err,
+          )
+        }
+        if (attempt === delays.length) break
+        await sleep(delays[attempt])
+      }
+    }
+    if (!hash) {
+      throw new AmbiguousBroadcastError(
+        `${chain.short} 发送结果不明：${lastError instanceof Error ? lastError.message : String(lastError)}`,
+        undefined,
+        txHash,
+      )
+    }
+    const receipt = await waitForNativeReceipt(chain, hash).catch(() => null)
+    if (!receipt) {
+      return {
+        status: 'pending',
+        hash,
+        from,
+        to: input.to,
+        amount: input.amount,
+        gasUsed: 0n,
+        effectiveGasPrice: gasPrice,
+        fee: '待确认',
+      }
+    }
+    return toResult(receipt, hash)
+  } catch (err) {
+    if (!broadcastStarted && !(err instanceof BroadcastError)) {
+      throw new PreBroadcastError(
+        `${chain.short} 发送前失败：${err instanceof Error ? err.message : String(err)}`,
+        err,
+      )
+    }
+    throw err
+  }
 }
 
 export async function getNativeBalance(chain: ChainConfig, address: string): Promise<NativeBalance> {

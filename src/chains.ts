@@ -23,6 +23,15 @@ export interface ChainConfig {
   native: NativeAsset
   /** 区块浏览器交易前缀；批量结果只提供链接，不自动查证。 */
   explorerTx?: string
+  /** 该链支持的 ERC-20/BEP-20 代币；原生币以外只从这里选。 */
+  tokens?: TokenAsset[]
+}
+
+/** BSC 上的 BTC 锚定币 BTCB（BEP-20，18 位小数）。 */
+export const BSC_BTCB: TokenAsset = {
+  symbol: 'BTCB',
+  address: '0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c',
+  decimals: 18,
 }
 
 export const BSC: ChainConfig = {
@@ -32,6 +41,7 @@ export const BSC: ChainConfig = {
   short: 'BSC',
   native: { symbol: 'BNB', name: 'BNB', decimals: 18 },
   explorerTx: 'https://bscscan.com/tx/',
+  tokens: [BSC_BTCB],
   rpc: [
     { url: 'https://bsc-dataseed.binance.org', label: 'Binance' },
     { url: 'https://bsc-dataseed1.binance.org', label: 'Binance 1' },

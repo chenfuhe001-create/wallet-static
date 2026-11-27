@@ -19,7 +19,15 @@ import type {
   BatchPlanItem,
   BatchSenderAdapter,
 } from './evm/batch'
-import { estimateNativeTransfer, getNativeBalance, getNativeGasPrice, sendNative } from './evm/native'
+import {
+  estimateErc20Transfer,
+  estimateNativeTransfer,
+  getErc20Balance,
+  getNativeBalance,
+  getNativeGasPrice,
+  sendErc20,
+  sendNative,
+} from './evm/native'
 import { getAaOverview, getBundlerGasPrice, sendAaTransfer } from './evm/op'
 import { reconcileErc20Batch, reconcileUserOps } from './evm/reconcile'
 import type { ReconcileOutcome } from './evm/reconcile'
@@ -62,12 +70,27 @@ function makeAdapters(
 
   for (const wallet of wallets) {
     if (!aaChain) {
+      const token = chain.tokens?.find((item) => item.symbol === assetSymbol) ?? null
       adapters.set(wallet.address, {
         address: wallet.address,
         minIntervalMs: 800,
         async precheck(amount, to) {
           const balance = await getNativeBalance(chain, wallet.address)
-          const value = parseUnits(amount, chain.native.decimals)
+          const value = parseUnits(amount, token ? token.decimals : chain.native.decimals)
+          if (token) {
+            const tokenBalance = await getErc20Balance(chain, token, wallet.address)
+            if (tokenBalance.raw < value) return `${token.symbol} 余额不足`
+            const estimate = await estimateErc20Transfer(chain, {
+              from: wallet.address,
+              to,
+              token,
+              amount,
+            })
+            if (balance.wei < parseUnits(estimate.fee, chain.native.decimals)) {
+              return `${chain.native.symbol} 余额不足以支付手续费`
+            }
+            return null
+          }
           if (balance.wei < value) return `${chain.native.symbol} 余额不足以支付金额`
           const estimate = await estimateNativeTransfer(chain, {
             from: wallet.address,
@@ -81,7 +104,14 @@ function makeAdapters(
         },
         async send(to, amount) {
           try {
-            const res = await sendNative(chain, { privateKey: wallet.privateKey, to, amount })
+            const res = token
+              ? await sendErc20(chain, {
+                  privateKey: wallet.privateKey,
+                  to,
+                  token,
+                  amount,
+                })
+              : await sendNative(chain, { privateKey: wallet.privateKey, to, amount })
             return {
               status: res.status,
               hash: res.hash,

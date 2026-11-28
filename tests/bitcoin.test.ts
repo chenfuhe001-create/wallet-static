@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { btcAddressFromPrivateKey, validateBitcoinAddress } from '../src/bitcoin/address'
+import { getBitcoinExport, wifToPrivateKey } from '../src/bitcoin/export'
 import { estimateVsize, feeFor, feeRatesFromEstimates, selectUtxos } from '../src/bitcoin/fees'
 import { buildBitcoinTransfer } from '../src/bitcoin/tx'
 import { BitcoinAmbiguousError, sendBitcoin } from '../src/bitcoin/send'
@@ -33,6 +34,29 @@ describe('比特币地址与费率', () => {
       slow: 2,
     })
     expect(feeRatesFromEstimates({})).toEqual({ fast: 1, normal: 1, slow: 1 })
+  })
+})
+
+describe('比特币单钥导出', () => {
+  it('私钥 1 的压缩 WIF 与 P2WPKH 地址符合已知向量', () => {
+    const info = getBitcoinExport(KEY1)
+    expect(info.wif).toBe('KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWn')
+    expect(info.prefixedWif).toBe(`p2wpkh:${info.wif}`)
+    expect(info.address).toBe('bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4')
+    expect(info.scriptType).toBe('P2WPKH')
+    expect(info.network).toBe('mainnet')
+  })
+
+  it('WIF 解码后仍是同一私钥和地址', () => {
+    const info = getBitcoinExport(KEY2)
+    const raw = wifToPrivateKey(info.wif)
+    expect(raw).toBe(KEY2)
+    expect(btcAddressFromPrivateKey(raw)).toBe(info.address)
+  })
+
+  it('非法私钥直接拒绝', () => {
+    expect(() => getBitcoinExport('0x1234' as never)).toThrow('比特币私钥')
+    expect(() => wifToPrivateKey('not-a-wif')).toThrow('WIF')
   })
 })
 

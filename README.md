@@ -48,6 +48,18 @@
 - 广播前本地选 UTXO、算 vsize/粉尘找零、本地签名；广播响应丢失时按 txid 核对，重播同一份 raw tx，绝不重新选 UTXO 构造第二笔。
 - 默认链仍是以太坊 AA；切换链会记住，Bitcoin 也可以设为默认。
 
+### 导出到其他钱包（WIF）
+
+- 比特币工作区新增「导出到其他钱包」：显示 **标准 WIF** 与 **`p2wpkh:WIF`**，可扫码/复制，60 秒后自动清除。
+- 地址本身是标准 **P2WPKH（Native SegWit）**。如果别的钱包导入后显示 `1…` 而不是 `bc1q…`，那是它按 Legacy/P2PKH 解析了同一把私钥，你的余额仍在 `bc1q…` 地址上。
+- 导入路径：
+  - **BlueWallet**：Import wallet → 粘贴 `p2wpkh:WIF`。
+  - **Electrum**：Wallet → Private Keys → Sweep，输入 `p2wpkh:WIF`；有 seed 的钱包不能直接导入。
+  - **Sparrow**：Tools → Sweep Private Key → 标准 WIF → Script Type 选 Native SegWit。
+  - **Bitcoin Core**：高级用户 `importdescriptors` 的 `wpkh(WIF)`。
+  - **只支持助记词的钱包**：不能导入单私钥，只能新建 BIP84 钱包后把 BTC 转过去。
+- ⚠️ **WIF 就是 EVM 私钥**：导入第三方钱包会同时暴露 EVM 资产；更安全的做法是新建独立钱包后 sweep，再停用这个共享地址。
+
 ## 网络失败与重试
 
 - **广播前失败**（读 RPC、估算 gas、签名）：交易肯定没发出，批量里标「失败」且可重试。
@@ -100,6 +112,7 @@ npm run build
 - [x] 原生比特币主网 P2WPKH 单笔转账（Blockstream/mempool.space）
 - [x] BSC BTCB（BEP-20）单笔/批量转账，gas 用 BNB
 - [x] 地址簿独立 WebAuthn PRF 指纹解锁
+- [x] Bitcoin WIF 导出（标准 / `p2wpkh:` 前缀，60 秒自动清除，可扫码）
 - [ ] 批量真实 canary（BSC 0.001 BNB ×3 / OP 0.01 USDC ×2，待用户批准）
 - [x] 本地指纹（WebAuthn PRF）：PRF → HKDF → AES-GCM 包装密码，改密/导入/清除后失效
 - [ ] 本地地址本（未列入本期）
